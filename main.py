@@ -1,5 +1,5 @@
-
-"""Main Application Entry Point
+"""
+Main Application Entry Point
 Initializes managers, controllers, threads, and launches the GUI overlay.
 """
 

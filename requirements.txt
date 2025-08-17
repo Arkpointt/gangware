@@ -1,0 +1,5 @@
+# Gangware AI Assistant
+# Requirements for core modules
+opencv-python
+pydirectinput
+PyQt6

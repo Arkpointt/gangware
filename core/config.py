@@ -1,43 +1,48 @@
+"""core.config
+Configuration core: load/save helpers for config.ini.
+
+This module provides a tiny ConfigManager used by the application to read
+and persist simple key/value settings. It purposely keeps a small API:
+ConfigManager.load(), get(key, fallback), and save().
 """
-Configuration Core Module
-Handles configuration loading and saving.
-"""
+
+from configparser import ConfigParser
+from pathlib import Path
+
 
 class ConfigManager:
+    """Simple configuration manager backed by an INI file.
+
+    Behaviour:
+    - Uses a single DEFAULT section for lookups.
+    - Creates the file with sensible defaults if it does not exist.
     """
-    Loads, gets, and saves settings from config.ini.
-    """
-    def __init__(self, config_path='config/config.ini'):
-        import configparser
-        self.config_path = config_path
-        self.config = configparser.ConfigParser()
+
+    def __init__(self, config_path: str = "config/config.ini"):
+        self.config_path = Path(config_path)
+        self.config = ConfigParser()
         self.load()
 
-    def load(self):
-        """
-        Loads configuration from file.
-        """
-        import os
-        if os.path.exists(self.config_path):
+    def load(self) -> None:
+        """Load configuration from disk, creating defaults when needed."""
+        if self.config_path.exists():
             self.config.read(self.config_path)
-        else:
-            # If config file doesn't exist, create with defaults
-            self.config['DEFAULT'] = {
-                'log_level': 'INFO',
-                'dry_run': 'False',
-                'resolution': '1920x1080'
-            }
-            self.save()
+            return
 
-    def get(self, key, fallback=None):
-        """
-        Gets a configuration value.
-        """
-        return self.config['DEFAULT'].get(key, fallback)
+        # Defaults when there is no config file yet
+        self.config["DEFAULT"] = {
+            "log_level": "INFO",
+            "dry_run": "False",
+            "resolution": "1920x1080",
+        }
+        self.save()
 
-    def save(self):
-        """
-        Saves configuration to file.
-        """
-        with open(self.config_path, 'w') as configfile:
-            self.config.write(configfile)
+    def get(self, key: str, fallback=None):
+        """Return a value from the DEFAULT section or the provided fallback."""
+        return self.config["DEFAULT"].get(key, fallback)
+
+    def save(self) -> None:
+        """Persist current configuration to disk (creates parent directories)."""
+        self.config_path.parent.mkdir(parents=True, exist_ok=True)
+        with self.config_path.open("w", encoding="utf-8") as fh:
+            self.config.write(fh)

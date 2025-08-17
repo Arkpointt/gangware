@@ -16,6 +16,7 @@ def execute_tek_punch(input_controller):
     input_controller.click()         # Simulate punch
     print("Tek Punch executed.")
 
+
 def execute_medbrew_burst(input_controller):
     """
     Executes the Medbrew Burst macro using input automation.

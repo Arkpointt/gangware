@@ -6,11 +6,19 @@ Processes tasks from the queue.
 
 import threading
 
+
 class Worker(threading.Thread):
-    """
-    Worker thread for executing tasks from the queue.
-    """
-    def __init__(self, config_manager, state_manager, vision_controller, input_controller, task_queue, status_callback=None):
+    """Worker thread for executing tasks from the queue."""
+
+    def __init__(
+        self,
+        config_manager,
+        state_manager,
+        vision_controller,
+        input_controller,
+        task_queue,
+        status_callback=None,
+    ):
         super().__init__(daemon=True)
         self.config_manager = config_manager
         self.state_manager = state_manager
@@ -21,9 +29,7 @@ class Worker(threading.Thread):
         # Add more initialization as needed
 
     def run(self):
-        """
-        Main loop for processing tasks from the queue.
-        """
+        """Main loop for processing tasks from the queue."""
         while True:
             try:
                 # Get next task (blocking)

@@ -6,10 +6,10 @@ Handles all input automation tasks.
 
 import pydirectinput
 
+
 class InputController:
-    """
-    Main class for mouse, keyboard, and input automation.
-    """
+    """Main class for mouse, keyboard, and input automation."""
+
     def __init__(self):
         # Initialization if needed
         pass

@@ -3,6 +3,7 @@ Armor Swapper Macro
 Executes armor swapping using vision-based loops.
 """
 
+
 def execute(vision_controller, input_controller, armor_set_name):
     """
     Executes the armor swap macro using dynamic, vision-based logic.

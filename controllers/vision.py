@@ -4,9 +4,11 @@ Vision System Module
 Handles all computer vision tasks for GUI perception.
 """
 
+
 import cv2
 import numpy as np
 import mss
+
 
 class VisionController:
     """
@@ -37,13 +39,15 @@ class VisionController:
 
         # Template matching
         result = cv2.matchTemplate(screenshot_gray, template, cv2.TM_CCOEFF_NORMED)
-        min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(result)
+        _, max_val, _, max_loc = cv2.minMaxLoc(result)
 
         if max_val >= confidence:
             # Calculate center coordinates of the match
             t_height, t_width = template.shape
             center_x = max_loc[0] + t_width // 2
             center_y = max_loc[1] + t_height // 2
-            return (center_x, center_y)
-        else:
-            return None
+            return center_x, center_y
+
+        return None
+
+

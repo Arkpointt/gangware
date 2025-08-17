@@ -24,12 +24,17 @@ class OverlayWindow:
         )
         self.window.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.window.setGeometry(self._get_top_right_geometry(360, 140))
-        self.window.setStyleSheet("""
-            background: qlineargradient(spread:pad, x1:0, y1:0, x2:1, y2:1, stop:0 rgba(8,18,28,200), stop:1 rgba(18,38,58,180));
+        self.window.setStyleSheet(
+            """
+            background: qlineargradient(
+                spread:pad, x1:0, y1:0, x2:1, y2:1,
+                stop:0 rgba(8,18,28,200), stop:1 rgba(18,38,58,180)
+            );
             border: 1px solid rgba(0,234,255,0.9);
             border-radius: 12px;
             font-family: 'Consolas', 'Courier New', monospace;
-        """)
+            """
+        )
 
         # Status layout: header + status line
         if calibration_mode:

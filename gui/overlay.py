@@ -1,6 +1,9 @@
 """
 Overlay Window Module
 User interface overlay using PyQt6.
+
+This module exposes a small overlay window and a helper that the
+hotkey manager can use to prompt the user during calibration.
 """
 
 from PyQt6.QtWidgets import QApplication, QWidget, QLabel
@@ -13,7 +16,7 @@ class StatusSignaller(QObject):
 
 
 class OverlayWindow:
-    def __init__(self, calibration_mode=False, message=None):
+    def __init__(self, calibration_mode: bool = False, message: str | None = None):
         self.app = QApplication([])
         self.window = QWidget()
         self.window.setWindowFlags(
@@ -70,6 +73,15 @@ class OverlayWindow:
     def set_status(self, text: str):
         # Public method for other threads to request a status update
         self.signaller.status.emit(text)
+
+    def prompt_key_capture(self, prompt: str):
+        """Update the overlay to prompt the user for a key press.
+
+        This is non-blocking and simply updates the text shown on the
+        overlay; the HotkeyManager is responsible for performing the
+        actual global key capture.
+        """
+        self.set_status(f"{prompt}\nPress the desired key now...")
 
     def _get_top_right_geometry(self, width, height):
         screen = self.app.primaryScreen().geometry()

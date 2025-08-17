@@ -61,101 +61,26 @@ class HotkeyManager(threading.Thread):
         """Run interactive calibration capturing two key presses.
 
         Returns True when both keys were captured and saved, False on
-        error or if the `keyboard` dependency is missing.
+        error or if Windows API is unavailable.
         """
-        # Use a lightweight, dependency-free approach on Windows by
-        # polling GetAsyncKeyState. This avoids requiring users to
-        # install external packages; the app ships as an executable.
         if user32 is None:
             if self.overlay:
                 self.overlay.set_status("Calibration is supported on Windows only.")
             return False
 
-        def vk_name(vk: int) -> str:
-            """Return a human-readable name for common virtual key codes."""
-            # Mouse buttons
-            mouse_map = {1: "left", 2: "right", 4: "middle", 5: "xbutton1", 6: "xbutton2"}
-            if vk in mouse_map:
-                return mouse_map[vk]
-            # Letters
-            if 0x41 <= vk <= 0x5A:
-                return chr(vk)
-            # Numbers
-            if 0x30 <= vk <= 0x39:
-                return chr(vk)
-            # Function keys
-            if 0x70 <= vk <= 0x87:
-                return f"F{vk - 0x6F}"
-            special = {
-                0x1B: "esc",
-                0x20: "space",
-                0x09: "tab",
-                0x0D: "enter",
-                0x10: "shift",
-                0x11: "ctrl",
-                0x12: "alt",
-            }
-            return special.get(vk, f"vk_{vk}")
-
-        def capture_input(prompt: str) -> Optional[str]:
-            """Poll GetAsyncKeyState until a valid key or mouse button is pressed.
-
-            Returns a string like 'key_A' or 'mouse_xbutton1', or '__restart__'
-            when the user presses Escape to clear and re-enter.
-            """
-            if self.overlay:
-                self.overlay.prompt_key_capture(prompt)
-
-            while True:
-                # Scan a reasonable range of virtual-key codes
-                for vk in range(1, 256):
-                    state = user32.GetAsyncKeyState(vk)
-                    if state & 0x8000:
-                        name = vk_name(vk)
-                        # Left/right clicks are explicitly rejected
-                        if name in ("left", "right"):
-                            if self.overlay:
-                                self.overlay.set_status(
-                                    "Left/Right click not allowed — use another button or a keyboard key."
-                                )
-                            # small debounce
-                            time.sleep(0.2)
-                            break
-                        # Esc acts as a restart/clear signal
-                        if name == "esc":
-                            if self.overlay:
-                                self.overlay.set_status("Cleared current value — press a new key or button.")
-                            return "__restart__"
-
-                        # Determine whether this was a mouse button or keyboard key
-                        if vk in (1, 2, 4, 5, 6):
-                            return f"mouse_{name}"
-                        return f"key_{name}"
-                time.sleep(0.02)
         try:
-            # Allow restart when user presses Esc — loop until a real value
-            while True:
-                inv_key = capture_input("Press your Inventory key (keyboard or mouse)")
-                if not inv_key:
-                    return False
-                if inv_key == "__restart__":
-                    # restart capture
-                    continue
-                break
+            inv_key = self._prompt_until_valid("Press your Inventory key (keyboard or mouse)")
+            if not inv_key:
+                return False
 
-            while True:
-                tek_key = capture_input("Press your Tek Punch Cancel key (keyboard or mouse)")
-                if not tek_key:
-                    return False
-                if tek_key == "__restart__":
-                    continue
-                break
+            tek_key = self._prompt_until_valid(
+                "Press your Tek Punch Cancel key (keyboard or mouse)"
+            )
+            if not tek_key:
+                return False
 
-            # Save into config
-            self.config_manager.config["DEFAULT"]["inventory_key"] = str(inv_key)
-            self.config_manager.config["DEFAULT"]["tek_punch_cancel_key"] = str(tek_key)
-            self.config_manager.save()
-
+            # Persist and notify
+            self._save_calibration(inv_key, tek_key)
             if self.overlay:
                 self.overlay.set_status(f"Calibration saved: Inventory={inv_key}, TekCancel={tek_key}")
             return True
@@ -164,6 +89,103 @@ class HotkeyManager(threading.Thread):
             if self.overlay:
                 self.overlay.set_status("Calibration failed: see logs")
             return False
+
+    def _vk_name(self, vk: int) -> str:
+        """Return a human-readable name for common virtual key codes.
+
+        Kept as an instance method so it can be unit-tested separately.
+        """
+        # Mouse buttons
+        mouse_map = {1: "left", 2: "right", 4: "middle", 5: "xbutton1", 6: "xbutton2"}
+        if vk in mouse_map:
+            return mouse_map[vk]
+        # Letters
+        if 0x41 <= vk <= 0x5A:
+            return chr(vk)
+        # Numbers
+        if 0x30 <= vk <= 0x39:
+            return chr(vk)
+        # Function keys
+        if 0x70 <= vk <= 0x87:
+            return f"F{vk - 0x6F}"
+        special = {
+            0x1B: "esc",
+            0x20: "space",
+            0x09: "tab",
+            0x0D: "enter",
+            0x10: "shift",
+            0x11: "ctrl",
+            0x12: "alt",
+        }
+        return special.get(vk, f"vk_{vk}")
+
+    def _capture_input_windows(self, prompt: str) -> Optional[str]:
+        """Poll GetAsyncKeyState until a valid key or mouse button is pressed.
+
+        Returns a string like 'key_A' or 'mouse_xbutton1', or '__restart__'
+        when the user presses Escape to clear and re-enter.
+        """
+        if self.overlay:
+            self.overlay.prompt_key_capture(prompt)
+
+        while True:
+            # Scan a reasonable range of virtual-key codes
+            for vk in range(1, 256):
+                state = user32.GetAsyncKeyState(vk)
+                if state & 0x8000:
+                    result = self._process_pressed_vk(vk)
+                    if result == "__debounce__":
+                        # small debounce handled in helper; skip to outer loop
+                        break
+                    return result
+            time.sleep(0.02)
+
+    def _process_pressed_vk(self, vk: int) -> Optional[str]:
+        """Map a pressed virtual-key into a token or control signal.
+
+        Returns:
+        - 'mouse_x...' or 'key_X' for a valid input
+        - '__restart__' when Esc was pressed
+        - '__debounce__' when an invalid (left/right) mouse button was pressed
+        """
+        name = self._vk_name(vk)
+        # Left/right clicks are explicitly rejected
+        if name in ("left", "right"):
+            if self.overlay:
+                self.overlay.set_status(
+                    "Left/Right click not allowed — use another button or a keyboard key."
+                )
+            time.sleep(0.2)
+            return "__debounce__"
+
+        # Esc acts as a restart/clear signal
+        if name == "esc":
+            if self.overlay:
+                self.overlay.set_status("Cleared current value — press a new key or button.")
+            return "__restart__"
+
+        if vk in (1, 2, 4, 5, 6):
+            return f"mouse_{name}"
+        return f"key_{name}"
+
+    def _prompt_until_valid(self, prompt: str) -> Optional[str]:
+        """Prompt the user repeatedly until a non-restart value is captured.
+
+        Returns the captured token, or None on unrecoverable failure.
+        """
+        while True:
+            token = self._capture_input_windows(prompt)
+            if not token:
+                return None
+            if token == "__restart__":
+                continue
+            return token
+
+    def _save_calibration(self, inv_key: str, tek_key: str) -> None:
+        """Persist captured calibration keys into the config manager."""
+        self.config_manager.config["DEFAULT"]["inventory_key"] = str(inv_key)
+        self.config_manager.config["DEFAULT"]["tek_punch_cancel_key"] = str(tek_key)
+        self.config_manager.save()
 
     def _log(self, msg: str) -> None:
         # Small helper that updates overlay when available

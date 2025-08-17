@@ -48,6 +48,6 @@ class VisionController:
             center_y = max_loc[1] + t_height // 2
             return center_x, center_y
 
-        return None
- 
+    return None
+
 

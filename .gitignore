@@ -1,0 +1,19 @@
+.venv/
+__pycache__/
+*.pyc
+.vscode/
+.DS_Store
+logs/
+*.log
+.idea/
+# OS files
+Thumbs.db
+
+# Python
+.env
+env/
+build/
+dist/
+
+# OneDrive temp
+~$*

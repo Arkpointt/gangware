@@ -25,26 +25,34 @@ class OverlayWindow:
         self.window.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.window.setGeometry(self._get_top_right_geometry(360, 140))
         self.window.setStyleSheet("""
-            background: rgba(20, 40, 60, 160);
-            border: 2px solid #00eaff;
+            background: qlineargradient(spread:pad, x1:0, y1:0, x2:1, y2:1, stop:0 rgba(8,18,28,200), stop:1 rgba(18,38,58,180));
+            border: 1px solid rgba(0,234,255,0.9);
             border-radius: 12px;
+            font-family: 'Consolas', 'Courier New', monospace;
         """)
 
-        # Status label
+        # Status layout: header + status line
         if calibration_mode:
-            initial_text = message or "Calibration Mode Required:\nPlease complete initial setup."
-            color = "#ff0055"
+            header = "GANGWARE AI - CALIBRATION"
+            status_text = message or "Calibration required: please complete initial setup."
+            status_color = "#ff7a7a"
         else:
-            initial_text = "GANGWARE AI\nStatus: Online"
-            color = "#00eaff"
+            header = "GANGWARE AI"
+            status_text = "Status: Online"
+            status_color = "#00eaff"
 
-        self.label = QLabel(initial_text, self.window)
-        self.label.setFont(QFont("Consolas", 14, QFont.Weight.Bold))
-        self.label.setStyleSheet(f"""
-            color: {color};
-        """)
-        self.label.setGeometry(QRect(16, 12, 328, 116))
-        self.label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        # Header label (small, neon)
+        self.header_label = QLabel(f"<b>{header}</b>", self.window)
+        self.header_label.setFont(QFont("Consolas", 12, QFont.Weight.Bold))
+        self.header_label.setStyleSheet("color: rgba(200,220,255,0.95);")
+        self.header_label.setGeometry(QRect(18, 10, 320, 28))
+
+        # Status label (dynamic)
+        self.label = QLabel(status_text, self.window)
+        self.label.setFont(QFont("Consolas", 12))
+        self.label.setStyleSheet(f"color: {status_color};")
+        self.label.setGeometry(QRect(18, 40, 320, 88))
+        self.label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
 
         # Signaller for thread-safe status updates
         self.signaller = StatusSignaller()

@@ -6,8 +6,10 @@ and persist simple key/value settings. It purposely keeps a small API:
 ConfigManager.load(), get(key, fallback), and save().
 """
 
+import os
 from configparser import ConfigParser
 from pathlib import Path
+from typing import Optional
 
 
 class ConfigManager:
@@ -16,10 +18,21 @@ class ConfigManager:
     Behaviour:
     - Uses a single DEFAULT section for lookups.
     - Creates the file with sensible defaults if it does not exist.
+    - Defaults to a per-user config path (%APPDATA% on Windows,
+      XDG_CONFIG_HOME or ~/.config on other systems) unless an explicit
+      path is provided.
     """
 
-    def __init__(self, config_path: str = "config/config.ini"):
-        self.config_path = Path(config_path)
+    def __init__(self, config_path: Optional[str] = None) -> None:
+        if config_path:
+            self.config_path = Path(config_path)
+        else:
+            if os.name == "nt":
+                base = Path(os.getenv("APPDATA", Path.home() / "AppData" / "Roaming"))
+            else:
+                base = Path(os.getenv("XDG_CONFIG_HOME", Path.home() / ".config"))
+            self.config_path = base.joinpath("Gangware", "config.ini")
+
         self.config = ConfigParser()
         self.load()
 
@@ -34,6 +47,10 @@ class ConfigManager:
             "log_level": "INFO",
             "dry_run": "False",
             "resolution": "1920x1080",
+            "calibration_complete": "False",
+            "inventory_key": "",
+            "tek_punch_cancel_key": "",
+            "ui_demo": "False",
         }
         self.save()
 

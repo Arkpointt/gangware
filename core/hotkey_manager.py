@@ -11,12 +11,13 @@ DEFAULT section as `inventory_key` and `tek_punch_cancel_key`.
 import threading
 import time
 from typing import Optional
+import sys
 
-try:
-    from pynput import keyboard as pkb, mouse as pmouse  # type: ignore
-except Exception:
-    pkb = None
-    pmouse = None
+if sys.platform == "win32":
+    import ctypes
+    user32 = ctypes.windll.user32
+else:
+    user32 = None
 
 
 class HotkeyManager(threading.Thread):
@@ -62,91 +63,75 @@ class HotkeyManager(threading.Thread):
         Returns True when both keys were captured and saved, False on
         error or if the `keyboard` dependency is missing.
         """
-        # Prefer pynput for combined keyboard+mouse capture
-        if pkb is None or pmouse is None:
+        # Use a lightweight, dependency-free approach on Windows by
+        # polling GetAsyncKeyState. This avoids requiring users to
+        # install external packages; the app ships as an executable.
+        if user32 is None:
             if self.overlay:
-                self.overlay.set_status("Calibration requires the 'pynput' package.")
+                self.overlay.set_status("Calibration is supported on Windows only.")
             return False
 
-        from threading import Event
+        def vk_name(vk: int) -> str:
+            """Return a human-readable name for common virtual key codes."""
+            # Mouse buttons
+            mouse_map = {1: "left", 2: "right", 4: "middle", 5: "xbutton1", 6: "xbutton2"}
+            if vk in mouse_map:
+                return mouse_map[vk]
+            # Letters
+            if 0x41 <= vk <= 0x5A:
+                return chr(vk)
+            # Numbers
+            if 0x30 <= vk <= 0x39:
+                return chr(vk)
+            # Function keys
+            if 0x70 <= vk <= 0x87:
+                return f"F{vk - 0x6F}"
+            special = {
+                0x1B: "esc",
+                0x20: "space",
+                0x09: "tab",
+                0x0D: "enter",
+                0x10: "shift",
+                0x11: "ctrl",
+                0x12: "alt",
+            }
+            return special.get(vk, f"vk_{vk}")
 
         def capture_input(prompt: str) -> Optional[str]:
-            """Wait for either a keyboard key or a mouse button, reject
-            left/right clicks and the Esc key. Returns a normalized name.
+            """Poll GetAsyncKeyState until a valid key or mouse button is pressed.
+
+            Returns a string like 'key_A' or 'mouse_xbutton1', or '__restart__'
+            when the user presses Escape to clear and re-enter.
             """
             if self.overlay:
                 self.overlay.prompt_key_capture(prompt)
 
-            result: dict = {"value": None}
-            done = Event()
+            while True:
+                # Scan a reasonable range of virtual-key codes
+                for vk in range(1, 256):
+                    state = user32.GetAsyncKeyState(vk)
+                    if state & 0x8000:
+                        name = vk_name(vk)
+                        # Left/right clicks are explicitly rejected
+                        if name in ("left", "right"):
+                            if self.overlay:
+                                self.overlay.set_status(
+                                    "Left/Right click not allowed — use another button or a keyboard key."
+                                )
+                            # small debounce
+                            time.sleep(0.2)
+                            break
+                        # Esc acts as a restart/clear signal
+                        if name == "esc":
+                            if self.overlay:
+                                self.overlay.set_status("Cleared current value — press a new key or button.")
+                            return "__restart__"
 
-            # Keyboard callback
-            def on_press(key):
-                try:
-                    name = None
-                    if hasattr(key, "char") and key.char is not None:
-                        name = key.char
-                    else:
-                        name = key.name  # special keys like esc, enter
-                except Exception:
-                    name = str(key)
-
-                if name is None:
-                    return
-
-                # Normalize and handle Escape as a "restart" signal
-                if str(name).lower() in ("esc", "escape"):
-                    # Signal that the user wants to clear/restart the capture
-                    result["value"] = "__restart__"
-                    if self.overlay:
-                        self.overlay.set_status("Cleared current value — press a new key or button.")
-                    done.set()
-                    return False
-
-                result["value"] = f"key_{str(name)}"
-                done.set()
-                return False
-
-            # Mouse callback
-            def on_click(x, y, button, pressed):
-                # We only care about press events
-                if not pressed:
-                    return
-                try:
-                    bname = button.name
-                except Exception:
-                    bname = str(button).lower()
-
-                # Reject left and right clicks explicitly
-                if bname in ("left", "right"):
-                    if self.overlay:
-                        self.overlay.set_status("Left/Right click not allowed — use another button or a keyboard key.")
-                    return
-
-                result["value"] = f"mouse_{bname}"
-                done.set()
-                return False
-
-            k_listener = pkb.Listener(on_press=on_press)
-            m_listener = pmouse.Listener(on_click=on_click)
-
-            k_listener.start()
-            m_listener.start()
-
-            # Wait until an allowed input is captured
-            done.wait()
-
-            # Stop listeners
-            try:
-                k_listener.stop()
-            except Exception:
-                pass
-            try:
-                m_listener.stop()
-            except Exception:
-                pass
-
-            return result["value"]
+                        # Determine whether this was a mouse button or keyboard key
+                        if vk in (1, 2, 4, 5, 6):
+                            return f"mouse_{name}"
+                        return f"key_{name}"
+                time.sleep(0.02)
         try:
             # Allow restart when user presses Esc — loop until a real value
             while True:

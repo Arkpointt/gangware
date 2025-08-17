@@ -13,9 +13,10 @@ import time
 from typing import Optional
 
 try:
-    import keyboard  # type: ignore
+    from pynput import keyboard as pkb, mouse as pmouse  # type: ignore
 except Exception:
-    keyboard = None
+    pkb = None
+    pmouse = None
 
 
 class HotkeyManager(threading.Thread):
@@ -61,33 +62,109 @@ class HotkeyManager(threading.Thread):
         Returns True when both keys were captured and saved, False on
         error or if the `keyboard` dependency is missing.
         """
-        if keyboard is None:
-            # Keyboard package not available - notify via overlay and abort
+        # Prefer pynput for combined keyboard+mouse capture
+        if pkb is None or pmouse is None:
             if self.overlay:
-                self.overlay.set_status("Calibration requires the 'keyboard' package.")
+                self.overlay.set_status("Calibration requires the 'pynput' package.")
             return False
 
-        # Helper to capture a single key press
-        def capture(prompt: str) -> Optional[str]:
+        from threading import Event
+
+        def capture_input(prompt: str) -> Optional[str]:
+            """Wait for either a keyboard key or a mouse button, reject
+            left/right clicks and the Esc key. Returns a normalized name.
+            """
             if self.overlay:
                 self.overlay.prompt_key_capture(prompt)
-            # Wait for the next key event
-            event = keyboard.read_event(suppress=False)
-            # We're interested in key down events
-            while event.event_type != "down":
-                event = keyboard.read_event(suppress=False)
-            # Normalize the name
-            name = event.name
-            # Convert numbers on top row to their key names when available
-            return name
 
+            result: dict = {"value": None}
+            done = Event()
+
+            # Keyboard callback
+            def on_press(key):
+                try:
+                    name = None
+                    if hasattr(key, "char") and key.char is not None:
+                        name = key.char
+                    else:
+                        name = key.name  # special keys like esc, enter
+                except Exception:
+                    name = str(key)
+
+                if name is None:
+                    return
+
+                # Normalize and handle Escape as a "restart" signal
+                if str(name).lower() in ("esc", "escape"):
+                    # Signal that the user wants to clear/restart the capture
+                    result["value"] = "__restart__"
+                    if self.overlay:
+                        self.overlay.set_status("Cleared current value — press a new key or button.")
+                    done.set()
+                    return False
+
+                result["value"] = f"key_{str(name)}"
+                done.set()
+                return False
+
+            # Mouse callback
+            def on_click(x, y, button, pressed):
+                # We only care about press events
+                if not pressed:
+                    return
+                try:
+                    bname = button.name
+                except Exception:
+                    bname = str(button).lower()
+
+                # Reject left and right clicks explicitly
+                if bname in ("left", "right"):
+                    if self.overlay:
+                        self.overlay.set_status("Left/Right click not allowed — use another button or a keyboard key.")
+                    return
+
+                result["value"] = f"mouse_{bname}"
+                done.set()
+                return False
+
+            k_listener = pkb.Listener(on_press=on_press)
+            m_listener = pmouse.Listener(on_click=on_click)
+
+            k_listener.start()
+            m_listener.start()
+
+            # Wait until an allowed input is captured
+            done.wait()
+
+            # Stop listeners
+            try:
+                k_listener.stop()
+            except Exception:
+                pass
+            try:
+                m_listener.stop()
+            except Exception:
+                pass
+
+            return result["value"]
         try:
-            inv_key = capture("Press your Inventory key (hobat 1-0 on some keyboards)")
-            if not inv_key:
-                return False
-            tek_key = capture("Press your Tek Punch Cancel key (hobat 1-0)")
-            if not tek_key:
-                return False
+            # Allow restart when user presses Esc — loop until a real value
+            while True:
+                inv_key = capture_input("Press your Inventory key (keyboard or mouse)")
+                if not inv_key:
+                    return False
+                if inv_key == "__restart__":
+                    # restart capture
+                    continue
+                break
+
+            while True:
+                tek_key = capture_input("Press your Tek Punch Cancel key (keyboard or mouse)")
+                if not tek_key:
+                    return False
+                if tek_key == "__restart__":
+                    continue
+                break
 
             # Save into config
             self.config_manager.config["DEFAULT"]["inventory_key"] = str(inv_key)

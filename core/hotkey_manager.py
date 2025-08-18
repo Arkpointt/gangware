@@ -45,6 +45,7 @@ class HotkeyManager(threading.Thread):
         self.overlay = overlay
         self._recalibrate_event = threading.Event()
         self._f1_down = False  # debounce for F1 toggle
+        self._f7_down = False  # debounce for F7 recalibration
 
     def run(self):
         """Main loop for hotkey management.
@@ -94,6 +95,19 @@ class HotkeyManager(threading.Thread):
                     elif not is_down and self._f1_down:
                         # Released
                         self._f1_down = False
+            except Exception:
+                pass
+
+            # F7 triggers recalibration (global detection via Win32)
+            try:
+                if user32 is not None:
+                    is_down_f7 = bool(user32.GetAsyncKeyState(0x76) & 0x8000)
+                    if is_down_f7 and not self._f7_down:
+                        # Rising edge -> request recalibration
+                        self._f7_down = True
+                        self._recalibrate_event.set()
+                    elif not is_down_f7 and self._f7_down:
+                        self._f7_down = False
             except Exception:
                 pass
 
@@ -208,7 +222,7 @@ class HotkeyManager(threading.Thread):
         if name in ("left", "right"):
             if self.overlay:
                 self.overlay.set_status(
-                    "Left/Right click not allowed ��� use another button or a keyboard key."
+                    "Left/Right click not allowed — use another button or a keyboard key."
                 )
             time.sleep(0.2)
             return "__debounce__"

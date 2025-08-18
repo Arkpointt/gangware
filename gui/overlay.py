@@ -1,31 +1,58 @@
 """
-Overlay Window Module
-User interface overlay using PyQt6.
+Gangware Overlay (PyQt6)
 
-Features:
-- Anchored to the top-right corner across resolution/monitor changes
-- Click-through, always-on-top translucent window with neon-styled UI
-- Thread-safe status updates via signals
-- F7 recalibration signal dispatch
-- Visibility controls: set_visible/toggle_visibility for F1 hotkey support
-- Calibration helper prompts (prompt_key_capture and switch_to_main)
+Clean, professional overlay UI:
+- Frameless, translucent, always-on-top, anchored top-right.
+- Navigation: Main and Calibration pages via QStackedWidget.
+- Main: Macro hotkeys in two columns with stylized key boxes and flash feedback.
+- Calibration: Set Inventory Key, Set Tek Cancel Key, Capture Template, Start button, Back to Main.
+
+Public API (used by other components):
+- set_status(text), set_visible(bool), toggle_visibility()
+- switch_to_main(), switch_to_calibration()
+- on_recalibrate(slot), on_start(slot)
+- on_capture_inventory(slot), on_capture_tek(slot), on_capture_template(slot)
+- set_captured_inventory(token), set_captured_tek(token), set_template_status(ok, path)
+- success_flash(text=None, duration_ms=1200)
+- flash_hotkey_line(hotkey, duration_ms=2000)
+- set_hotkey_line_active(hotkey), clear_hotkey_line_active(hotkey, fade_duration_ms=2000)
 """
 
+from __future__ import annotations
+
 import os
-from PyQt6.QtWidgets import QApplication, QWidget, QLabel, QPushButton, QGraphicsOpacityEffect
-from PyQt6.QtCore import Qt, QRect, QObject, pyqtSignal, QTimer, QPropertyAnimation, QEasingCurve
+from typing import Callable, Dict, Optional
+
+from PyQt6.QtCore import QObject, QRect, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QFont, QKeySequence, QShortcut
+from PyQt6.QtWidgets import (
+    QApplication,
+    QFrame,
+    QGridLayout,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QStackedWidget,
+    QScrollArea,
+    QVBoxLayout,
+    QWidget,
+)
 
 
-class StatusSignaller(QObject):
+class _Signals(QObject):
     status = pyqtSignal(str)
-    recalibrate = pyqtSignal()
     visibility = pyqtSignal(bool)
     toggle = pyqtSignal()
-    start = pyqtSignal()
-    toast = pyqtSignal(str, int)
-    switch_to_calib = pyqtSignal()
     switch_to_main = pyqtSignal()
+    switch_to_calib = pyqtSignal()
+    start = pyqtSignal()
+    recalibrate = pyqtSignal()
+    capture_inventory = pyqtSignal()
+    capture_tek = pyqtSignal()
+    capture_template = pyqtSignal()
+    inv_value = pyqtSignal(str)
+    tek_value = pyqtSignal(str)
+    tmpl_status = pyqtSignal(bool, str)
     success = pyqtSignal(str, int)
     flash_line = pyqtSignal(str, int)
     hold_line = pyqtSignal(str)
@@ -33,48 +60,137 @@ class StatusSignaller(QObject):
 
 
 class OverlayWindow:
-    def __init__(self, calibration_mode: bool = False, message: str | None = None):
-        # Persist incoming state
-        self.calibration_mode = calibration_mode
-        self.initial_message = message
-        # Track visibility independently of Qt's isVisible(), which can be affected by flags
-        self._is_shown = True
+    CYAN = "#00D8FF"
+    ORANGE = "#FFB800"
+    GRAY = "#E0E0E0"
+    MAX_WIDTH = 520
+    NONE_DISPLAY = "[ None ]"
 
-        # Build application and base window
-        self._init_app_window()
-        # Compute DPI scale and apply geometry/style
-        self.scale = self._compute_scale()
-        self._apply_initial_geometry()
-        self._apply_window_style()
-        self._apply_tooltip_style()
-        # Create labels with initial header/status
-        header, status_text, status_color = self._initial_texts()
-        self._create_labels(header, status_text, status_color)
-        # Thread-safe signaller and toast UI
-        self._init_signaller()
-        self._init_toast()
-        self._success_fade_timer = None
-        self._line_flash_timer = None
-        self._active_line_hotkey = None
-        # Ensure initial anchor after show/layout (scheduled on first show)
-        # moved to show() to avoid QBasicTimer thread warnings before event loop
-        # Optional Start button in calibration mode
-        self._init_start_button()
-        # Connect screen and window signals
-        self._connect_screen_signals()
-        # Shortcuts (F7, F1, F10)
-        self._init_shortcuts()
-        # Initial fade-in scheduled in show()
+    def __init__(self, calibration_mode: bool = False, message: Optional[str] = None) -> None:
+        self.calibration_mode = bool(calibration_mode)
+        self.initial_message = message or ""
 
-    # -------------------- Initialization helpers --------------------
-    def _init_app_window(self) -> None:
-        self.app = QApplication([])
+        self.app = QApplication.instance() or QApplication([])
         self.window = QWidget()
-        self.window.setWindowTitle("Gangware")
-        self._configure_window_flags(click_through=not self.calibration_mode)
+        self.window.setMaximumWidth(self.MAX_WIDTH)
+        self.window.setObjectName("gw-root")
         self.window.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self._set_flags(click_through=not self.calibration_mode)
 
-    def _configure_window_flags(self, click_through: bool) -> None:
+        # Root styled frame
+        self.root = QVBoxLayout(self.window)
+        self.root.setContentsMargins(14, 12, 14, 12)
+        self.root.setSpacing(10)
+
+        self.chrome = QFrame(self.window)
+        self.chrome.setObjectName("gw-chrome")
+        self.chrome.setStyleSheet(
+            f"""
+            #gw-chrome {{
+                background-color: rgba(20,20,24,210);
+                border: 1px solid {self.CYAN};
+                border-radius: 12px;
+            }}
+            QWidget {{ font-family: Consolas; color: {self.GRAY}; }}
+            QPushButton {{
+                background-color: rgba(0,216,255,0.18);
+                border: 1px solid {self.CYAN};
+                border-radius: 6px;
+                padding: 6px 10px;
+                color: {self.GRAY};
+            }}
+            QPushButton:hover {{ background-color: rgba(0,216,255,0.32); }}
+            QPushButton:pressed {{ background-color: rgba(0,216,255,0.22); }}
+            QLabel.keybox {{
+                border: 1px solid rgba(0,216,255,0.45);
+                border-radius: 4px; padding: 3px 8px; color: {self.GRAY};
+            }}
+            QLabel.title {{ color: {self.CYAN}; font-weight: 700; }}
+            QLabel.section {{ color: {self.ORANGE}; font-weight: 700; }}
+            """
+        )
+        self.root.addWidget(self.chrome)
+
+        self.vbox = QVBoxLayout(self.chrome)
+        self.vbox.setContentsMargins(12, 10, 12, 10)
+        self.vbox.setSpacing(8)
+
+        # Header
+        self.header = QLabel("GANGWARE", self.chrome)
+        self.header.setProperty("class", "title")
+        self.header.setFont(QFont("Consolas", 14, QFont.Weight.Bold))
+        self.vbox.addWidget(self.header)
+
+        # Navigation
+        nav = QHBoxLayout()
+        self.btn_main = QPushButton("Main", self.chrome)
+        self.btn_calib = QPushButton("Calibration", self.chrome)
+        for b in (self.btn_main, self.btn_calib):
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_main.clicked.connect(lambda: self._show_page(0))
+        self.btn_calib.clicked.connect(lambda: self._show_page(1))
+        nav.addWidget(self.btn_main)
+        nav.addWidget(self.btn_calib)
+        self.vbox.addLayout(nav)
+
+        # Stack
+        self.stack = QStackedWidget(self.chrome)
+        self.vbox.addWidget(self.stack, 1)
+
+        # Footer status line
+        self.status = QLabel(self.initial_message or "Status: Online", self.chrome)
+        self.status.setWordWrap(True)
+        self.vbox.addWidget(self.status)
+
+        # Pages
+        self._hotkey_labels: Dict[str, QLabel] = {}
+        self.page_main = self._build_main()
+        self.page_calib = self._build_calibration()
+        self.stack.addWidget(self.page_main)
+        self.stack.addWidget(self.page_calib)
+
+        # Signals (queued)
+        self.signals = _Signals()
+        q = Qt.ConnectionType.QueuedConnection
+        self.signals.status.connect(self._set_status_ui, q)
+        self.signals.visibility.connect(self._set_visible_ui, q)
+        self.signals.toggle.connect(self._toggle_visible_ui, q)
+        self.signals.switch_to_main.connect(lambda: self._show_page(0), q)
+        self.signals.switch_to_calib.connect(lambda: self._show_page(1), q)
+        self.signals.inv_value.connect(self._set_captured_inventory_ui, q)
+        self.signals.tek_value.connect(self._set_captured_tek_ui, q)
+        self.signals.tmpl_status.connect(self._set_template_status_ui, q)
+        self.signals.success.connect(self._success_flash_ui, q)
+        self.signals.flash_line.connect(self._flash_line_ui, q)
+        self.signals.hold_line.connect(self._hold_line_ui, q)
+        self.signals.clear_line.connect(self._clear_line_ui, q)
+
+        # Shortcuts
+        sc_toggle = QShortcut(QKeySequence("F1"), self.window)
+        sc_toggle.setContext(Qt.ShortcutContext.ApplicationShortcut)
+        sc_toggle.activated.connect(lambda: self.signals.toggle.emit())
+        sc_recal = QShortcut(QKeySequence("F7"), self.window)
+        sc_recal.setContext(Qt.ShortcutContext.ApplicationShortcut)
+        sc_recal.activated.connect(lambda: self.signals.recalibrate.emit())
+        sc_exit = QShortcut(QKeySequence("F10"), self.window)
+        sc_exit.setContext(Qt.ShortcutContext.ApplicationShortcut)
+        sc_exit.activated.connect(lambda: os._exit(0))
+
+        # Geometry and start page
+        self._anchor_top_right(self.MAX_WIDTH, 360)
+        self._show_page(1 if self.calibration_mode else 0)
+        self.window.setWindowTitle("Gangware")
+        self.window.setWindowOpacity(0.98)
+        self.window.show()
+
+        # Internal timers
+        self._status_flash_timer: Optional[QTimer] = None
+        self._value_flash_timers: Dict[QLabel, QTimer] = {}
+
+        QTimer.singleShot(0, lambda: self._anchor_top_right(self.MAX_WIDTH, 360))
+
+    # ---- Window flags / placement ----
+    def _set_flags(self, click_through: bool) -> None:
         flags = (
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
@@ -84,704 +200,415 @@ class OverlayWindow:
             flags |= Qt.WindowType.WindowTransparentForInput
         self.window.setWindowFlags(flags)
 
-    def _compute_scale(self) -> float:
+    def _anchor_top_right(self, width: int, height: int) -> None:
+        screen = self.app.primaryScreen()
+        rect = screen.availableGeometry()
+        x = rect.x() + rect.width() - width - 20
+        y = rect.y() + 20
+        self.window.setGeometry(QRect(x, y, width, height))
+
+    # ---- Build pages ----
+    def _build_main(self) -> QWidget:
+        page = QWidget(self.chrome)
+        grid = QGridLayout(page)
+        grid.setContentsMargins(6, 6, 6, 6)
+        grid.setHorizontalSpacing(18)
+        grid.setVerticalSpacing(10)
+
+        title = QLabel("Macro Hotkeys (Ark window only)", page)
+        title.setProperty("class", "section")
+        title.setFont(QFont("Consolas", 11, QFont.Weight.Bold))
+        title.setWordWrap(True)
+        grid.addWidget(title, 0, 0, 1, 4)
+
+        entries = [
+            ("Equip Flak Armor", "F2"),
+            ("Equip Tek Armor", "F3"),
+            ("Equip Mixed Armor", "F4"),
+            ("Medbrew Burst", "Shift+Q"),
+            ("Medbrew Heal-over-Time (Toggle)", "Shift+E"),
+            ("Tek Punch", "Shift+R"),
+        ]
+
+        def add_row(r: int, desc: str, key: str, c: int) -> None:
+            d = QLabel(desc, page)
+            d.setFont(QFont("Consolas", 10))
+            d.setWordWrap(True)
+            k = QLabel(key, page)
+            k.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            k.setProperty("class", "keybox")
+            k.setMinimumWidth(72)
+            self._hotkey_labels[key] = k
+            grid.addWidget(d, r, c)
+            grid.addWidget(k, r, c + 1)
+
+        row = 1
+        for i, (desc, key) in enumerate(entries):
+            col = 0 if i % 2 == 0 else 2
+            if i % 2 == 0 and i > 0:
+                row += 1
+            add_row(row, desc, key, col)
+
+        return page
+
+    def _build_calibration(self) -> QWidget:
+        page = QWidget(self.chrome)
+        # Ensure calibration page inherits chrome background (transparent) and not white
         try:
-            screen = self.app.primaryScreen()
-            dpi = getattr(screen, "logicalDotsPerInch", lambda: 96)()
-            return max(1.0, min(2.0, dpi / 96.0))
+            page.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         except Exception:
-            return 1.0
+            pass
+        page.setStyleSheet("background: transparent;")
+        v = QVBoxLayout(page)
+        v.setContentsMargins(6, 6, 6, 6)
+        v.setSpacing(10)
 
-    def _apply_initial_geometry(self) -> None:
-        geom = self._get_top_right_geometry(int(520 * self.scale), int(360 * self.scale))
-        self.window.setGeometry(geom)
-
-    def _apply_window_style(self) -> None:
-        self.window.setStyleSheet(
-            """
-            background: qlineargradient(
-                spread:pad, x1:0, y1:0, x2:1, y2:1,
-                stop:0 rgba(8,18,28,200),
-                stop:1 rgba(18,38,58,180)
-            );
-            border: 1px solid rgba(0,234,255,0.9);
-            border-radius: 12px;
-            font-family: 'Consolas', 'Courier New', monospace;
-            """
+        # Rich descriptions
+        desc = QLabel(page)
+        desc.setWordWrap(True)
+        desc.setText(
+            "<b>Calibration</b><br><br>"
+            "<b>Inventory Key Button</b><br>"
+            "<i>Function</i>: One-time setup key.<br>"
+            "<i>Description</i>: When prompted by the GUI, press the key or mouse button you personally use to open your inventory (e.g., 'I' or 'Mouse4'). The application saves this so the AI knows how to open your inventory during macros." \
+            "<br><br>"
+            "<b>Tek Dash Button</b><br>"
+            "<i>Function</i>: In-game macro hotkey (Shift+R).<br>"
+            "<i>Description</i>: When you press Shift+R, it triggers the AI to execute the Tek Dash (Tek Boost) macro: a rapid, animation-canceling punch sequence for high-speed movement. The <b>Tek Cancel</b> key you set here is used inside this macro to cleanly cancel the punch animation." \
+            "<br><br>"
+            "<b>Inventory Image Button</b><br>"
+            "<i>Function</i>: One-time setup capture.<br>"
+            "<i>Description</i>: When prompted, hover your mouse over the inventory search bar and press F8. This captures a small screenshot to create a visual template that computer vision uses to locate where to click and type in your UI." \
+            "<br><br>"
+            "Complete all three, then click <b>Start</b> to return to the main overlay."
         )
+        v.addWidget(desc)
 
-    def _apply_tooltip_style(self) -> None:
+        # Rows
+        k_title = QLabel("Keybinds", page)
+        k_title.setProperty("class", "section")
+        k_title.setFont(QFont("Consolas", 11, QFont.Weight.Bold))
+        v.addWidget(k_title)
+
+        self.inv_row = self._task_row(page, "Set Inventory Key", "[SET]", lambda: self.signals.capture_inventory.emit())
+        v.addLayout(self.inv_row)
+        self.tek_row = self._task_row(page, "Set Tek Cancel Key", "[SET]", lambda: self.signals.capture_tek.emit())
+        v.addLayout(self.tek_row)
+
+        t_title = QLabel("Visual Templates", page)
+        t_title.setProperty("class", "section")
+        t_title.setFont(QFont("Consolas", 11, QFont.Weight.Bold))
+        v.addWidget(t_title)
+
+        self.tmpl_row = self._task_row(
+            page,
+            "Capture Inventory Template (hover search bar, press F8)",
+            "Capture",
+            lambda: self.signals.capture_template.emit(),
+        )
+        v.addLayout(self.tmpl_row)
+
+        # Action buttons
+        hb = QHBoxLayout()
+        self.btn_back = QPushButton("Back to Main", page)
+        self.btn_back.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_back.clicked.connect(lambda: self.signals.switch_to_main.emit())
+        hb.addWidget(self.btn_back)
+        hb.addStretch(1)
+        self.btn_start = QPushButton("Start", page)
+        self.btn_start.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_start.setEnabled(False)
+        self.btn_start.clicked.connect(lambda: self.signals.start.emit())
+        hb.addWidget(self.btn_start)
+        v.addLayout(hb)
+
+        scroll = QScrollArea(self.chrome)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # Make scroll area and viewport transparent to show chrome background
+        scroll.setStyleSheet("QScrollArea { background: transparent; }")
         try:
-            self.app.setStyleSheet(
+            scroll.viewport().setStyleSheet("background: transparent;")
+        except Exception:
+            pass
+        scroll.setWidget(page)
+        return scroll
+
+    def _task_row(self, parent: QWidget, text: str, btn_text: str, on_click: Callable[[], None]) -> QHBoxLayout:
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        lbl = QLabel(text, parent)
+        lbl.setFont(QFont("Consolas", 10))
+        lbl.setWordWrap(True)
+        btn = QPushButton(btn_text, parent)
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.clicked.connect(on_click)
+        box = QLabel(self.NONE_DISPLAY, parent)
+        box.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        box.setProperty("class", "keybox")
+        box.setMinimumWidth(120)
+        row.addWidget(lbl, 1)
+        row.addWidget(btn, 0)
+        row.addWidget(box, 0)
+        row._gw_display_box = box  # type: ignore[attr-defined]
+        row._gw_button = btn       # type: ignore[attr-defined]
+        return row
+
+    # ---- Public API ----
+    def set_status(self, text: str) -> None:
+        self.signals.status.emit(text)
+
+    def prompt_key_capture(self, prompt: str) -> None:
+        # Display a prompt in the status line during key capture
+        try:
+            self.signals.status.emit(str(prompt))
+        except Exception:
+            pass
+
+    def toggle_visibility(self) -> None:
+        self.signals.toggle.emit()
+
+    def set_visible(self, visible: bool) -> None:
+        self.signals.visibility.emit(bool(visible))
+
+    def switch_to_main(self) -> None:
+        self.signals.switch_to_main.emit()
+
+    def switch_to_calibration(self) -> None:
+        self.signals.switch_to_calib.emit()
+
+    def on_recalibrate(self, slot: Callable[[], None]):
+        self.signals.recalibrate.connect(slot)
+
+    def on_start(self, slot: Callable[[], None]):
+        self.signals.start.connect(slot)
+
+    def on_capture_inventory(self, slot: Callable[[], None]):
+        self.signals.capture_inventory.connect(slot)
+
+    def on_capture_tek(self, slot: Callable[[], None]):
+        self.signals.capture_tek.connect(slot)
+
+    def on_capture_template(self, slot: Callable[[], None]):
+        self.signals.capture_template.connect(slot)
+
+    def set_captured_inventory(self, token: str) -> None:
+        self.signals.inv_value.emit(token)
+
+    def set_captured_tek(self, token: str) -> None:
+        self.signals.tek_value.emit(token)
+
+    def set_template_status(self, ok: bool, path: Optional[str] = None) -> None:
+        self.signals.tmpl_status.emit(bool(ok), path or "")
+
+    def show(self) -> None:
+        self.app.exec()
+
+    def success_flash(self, text: Optional[str] = None, duration_ms: int = 1200) -> None:
+        self.signals.success.emit(text or "", int(duration_ms))
+
+    def flash_hotkey_line(self, hotkey: str, duration_ms: int = 2000) -> None:
+        self.signals.flash_line.emit(hotkey, int(duration_ms))
+
+    def set_hotkey_line_active(self, hotkey: str) -> None:
+        self.signals.hold_line.emit(hotkey)
+
+    def clear_hotkey_line_active(self, hotkey: str, fade_duration_ms: int = 2000) -> None:
+        self.signals.clear_line.emit(hotkey, int(fade_duration_ms))
+
+    # ---- UI slots ----
+    def _set_status_ui(self, text: str) -> None:
+        self.status.setText(text)
+
+    def _set_visible_ui(self, visible: bool) -> None:
+        if visible:
+            self.window.show()
+        else:
+            self.window.hide()
+
+    def _toggle_visible_ui(self) -> None:
+        self._set_visible_ui(not self.window.isVisible())
+
+    def _show_page(self, index: int) -> None:
+        index = 0 if index <= 0 else 1
+        self.stack.setCurrentIndex(index)
+        self._set_flags(click_through=(index == 0))
+        self.window.show()  # apply flags
+        # Bold the active nav button
+        if index == 0:
+            self.btn_main.setStyleSheet(self.btn_main.styleSheet() + "\nfont-weight: 700;")
+            self.btn_calib.setStyleSheet(self.btn_calib.styleSheet())
+        else:
+            self.btn_calib.setStyleSheet(self.btn_calib.styleSheet() + "\nfont-weight: 700;")
+            self.btn_main.setStyleSheet(self.btn_main.styleSheet())
+
+    def _set_captured_inventory_ui(self, token: str) -> None:
+        box: QLabel = getattr(self.inv_row, "_gw_display_box")  # type: ignore[attr-defined]
+        btn: QPushButton = getattr(self.inv_row, "_gw_button")  # type: ignore[attr-defined]
+        box.setText(f"[ {self._friendly_token(token)} ]")
+        self._flash_value_label(box)
+        self._flash_button_success(btn)
+        self._update_start_enabled()
+
+    def _set_captured_tek_ui(self, token: str) -> None:
+        box: QLabel = getattr(self.tek_row, "_gw_display_box")  # type: ignore[attr-defined]
+        btn: QPushButton = getattr(self.tek_row, "_gw_button")  # type: ignore[attr-defined]
+        box.setText(f"[ {self._friendly_token(token)} ]")
+        self._flash_value_label(box)
+        self._flash_button_success(btn)
+        self._update_start_enabled()
+
+    def _set_template_status_ui(self, ok: bool, path: str) -> None:
+        box: QLabel = getattr(self.tmpl_row, "_gw_display_box")  # type: ignore[attr-defined]
+        btn: QPushButton = getattr(self.tmpl_row, "_gw_button")  # type: ignore[attr-defined]
+        if ok:
+            box.setText("[ Captured ]")
+            box.setToolTip(path)
+            self._flash_value_label(box)
+            self._flash_button_success(btn)
+        else:
+            box.setText(self.NONE_DISPLAY)
+            box.setToolTip("")
+        self._update_start_enabled()
+
+    # ---- Feedback animations ----
+    def _success_flash_ui(self, text: str, duration_ms: int) -> None:
+        if text:
+            self.status.setText(text)
+        if self._status_flash_timer:
+            try:
+                self._status_flash_timer.stop()
+            except Exception:
+                pass
+        self._status_flash_timer = QTimer(self.window)
+        base_css = f"color: {self.GRAY}"
+        steps = max(8, min(40, duration_ms // 50))
+        interval = max(16, duration_ms // steps)
+        i = {"v": 0}
+
+        def step():
+            i["v"] += 1
+            t = i["v"] / steps
+            # neon green -> base
+            r, g, b = 0, int(255 + (224 - 255) * t), int(170 + (224 - 170) * t)
+            self.status.setStyleSheet(f"color: rgb({r},{g},{b})")
+            if i["v"] >= steps:
+                self._status_flash_timer.stop()
+                self.status.setStyleSheet(base_css)
+
+        self.status.setStyleSheet("color: #00ffaa")
+        self._status_flash_timer.timeout.connect(step)
+        self._status_flash_timer.start(interval)
+
+    def _flash_value_label(self, label: QLabel, duration_ms: int = 1200) -> None:
+        # Cancel prior timer for this label
+        if label in self._value_flash_timers:
+            try:
+                self._value_flash_timers[label].stop()
+            except Exception:
+                pass
+        timer = QTimer(self.window)
+        self._value_flash_timers[label] = timer
+        steps = max(10, min(50, duration_ms // 40))
+        interval = max(16, duration_ms // steps)
+        i = {"v": 0}
+
+        def style_for(t: float) -> str:
+            g = int(255 + (216 - 255) * t)
+            b = int(170 + (255 - 170) * t)
+            border = f"rgba(0,216,255,{0.75 - 0.45 * t:.2f})"
+            return (
+                f"border: 1px solid {border}; border-radius: 4px; padding: 3px 8px; "
+                f"color: rgb(0,{g},{b});"
+            )
+
+        def step():
+            i["v"] += 1
+            t = i["v"] / steps
+            label.setStyleSheet(style_for(t))
+            if i["v"] >= steps:
+                timer.stop()
+                label.setStyleSheet("")
+                label.setProperty("class", "keybox")
+
+        label.setStyleSheet(style_for(0.0))
+        timer.timeout.connect(step)
+        timer.start(interval)
+
+    def _flash_button_success(self, btn: QPushButton, duration_ms: int = 260) -> None:
+        try:
+            base = btn.styleSheet()
+            btn.setStyleSheet(
                 """
-                QToolTip {
+                QPushButton {
                     color: #0a0a0a;
-                    background-color: #00eaff;
-                    border: 1px solid rgba(0,234,255,0.9);
-                    padding: 4px 6px;
+                    background-color: #00ffaa;
+                    border: 1px solid rgba(0,255,170,1.0);
                     border-radius: 6px;
-                    font: 9pt 'Consolas';
+                    font-weight: bold;
                 }
                 """
             )
+            QTimer.singleShot(duration_ms, lambda: btn.setStyleSheet(base))
         except Exception:
             pass
 
-    def _initial_texts(self) -> tuple[str, str, str]:
-        if self.calibration_mode:
-            header = "Gangware - Calibration"
-            status_text = (
-                self.initial_message
-                or "Calibration required: please complete initial setup."
-            )
-            status_color = "#ff7a7a"
-        else:
-            header = "Gangware"
-            status_text = "Status: Online"
-            status_color = "#00eaff"
-        return header, status_text, status_color
-
-    def _create_labels(self, header: str, status_text: str, status_color: str) -> None:
-        # Header label (small, neon)
-        self.header_label = QLabel(f"<b>{header}</b>", self.window)
-        self.header_label.setFont(
-            QFont("Consolas", int(11 * getattr(self, "scale", 1.0)), QFont.Weight.Bold)
-        )
-        self.header_label.setStyleSheet("color: rgba(200,220,255,0.95);")
-        self.header_label.setGeometry(
-            QRect(int(18 * self.scale), int(10 * self.scale), int(420 * self.scale), int(28 * self.scale))
-        )
-        # Status label (dynamic)
-        self.label = QLabel(status_text, self.window)
-        self.label.setFont(QFont("Consolas", int(10 * self.scale)))
-        self.base_status_color = status_color
-        self.label.setStyleSheet(f"color: {status_color};")
-        self.label.setWordWrap(True)
-        self.label.setGeometry(
-            QRect(int(18 * self.scale), int(40 * self.scale), int(480 * self.scale), int(280 * self.scale))
-        )
-        self.label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
-        # Track the raw (plain text) content for selective line highlighting
-        self._raw_label_text = status_text
-
-    def _init_signaller(self) -> None:
-        self.signaller = StatusSignaller()
-        self.signaller.status.connect(self._update_status)
-        self.signaller.visibility.connect(self._set_visible)
-        self.signaller.toggle.connect(self._toggle_visible)
-        self.signaller.toast.connect(self._show_toast_ui)
-        self.signaller.switch_to_calib.connect(self._switch_to_calibration_ui)
-        self.signaller.switch_to_main.connect(self._switch_to_main_ui)
-        self.signaller.success.connect(self._success_flash_ui)
-        self.signaller.flash_line.connect(self._flash_line_ui)
-        self.signaller.hold_line.connect(self._hold_line_ui)
-        self.signaller.clear_line.connect(self._clear_line_ui)
-
-    def _init_toast(self) -> None:
-        # Toast notification (hidden by default)
-        self.toast = QLabel("", self.window)
-        self.toast.setStyleSheet(
-            """
-            color: #0a0a0a;
-            background-color: rgba(0, 255, 170, 0.95);
-            border: 1px solid rgba(0, 255, 170, 1.0);
-            border-radius: 10px;
-            padding: 6px 10px;
-            """
-        )
-        self.toast.setFont(QFont("Consolas", 9, QFont.Weight.Bold))
-        self.toast.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.toast.hide()
-        self.toast_effect = QGraphicsOpacityEffect(self.toast)
-        self.toast.setGraphicsEffect(self.toast_effect)
-
-    def _init_start_button(self) -> None:
-        self.start_button = None
-        if not self.calibration_mode:
+    # ---- Hotkey line highlight (main page) ----
+    def _flash_line_ui(self, hotkey: str, duration_ms: int) -> None:
+        lab = self._hotkey_labels.get(hotkey)
+        if not lab:
             return
-        self.start_button = QPushButton("Start", self.window)
-        self.start_button.setToolTip(
-            "Begin calibration flow (press F7 any time to recalibrate)"
-        )
-        self.start_button.setGeometry(
-            QRect(
-                int(400 * self.scale),
-                int(320 * self.scale),
-                int(100 * self.scale),
-                int(28 * self.scale),
-            )
-        )
-        self.start_button.setStyleSheet(
-            """
-            QPushButton {
-                color: #0a0a0a;
-                background-color: #00eaff;
-                border: 1px solid rgba(0,234,255,0.9);
-                border-radius: 6px;
-            }
-            QPushButton:hover { background-color: #33f0ff; }
-            QPushButton:pressed { background-color: #00c2d1; }
-            """
-        )
-        self.start_button.clicked.connect(lambda: self.signaller.start.emit())
+        self._highlight_key_label(lab, duration_ms)
 
-    def _connect_screen_signals(self) -> None:
-        # React to monitor geometry/availability changes
-        try:
-            for screen in self.app.screens():
-                try:
-                    screen.geometryChanged.connect(self.reposition)
-                except Exception:
-                    pass
-                try:
-                    screen.availableGeometryChanged.connect(self.reposition)
-                except Exception:
-                    pass
-        except Exception:
-            pass
-        # React when the window moves between screens or primary screen changes
-        handle = self.window.windowHandle()
-        if handle is not None:
-            try:
-                handle.screenChanged.connect(lambda *_: self.reposition())
-            except Exception:
-                pass
-        try:
-            self.app.primaryScreenChanged.connect(lambda *_: self.reposition())
-            self.app.screenAdded.connect(self._on_screen_added)
-            self.app.screenRemoved.connect(lambda *_: self.reposition())
-        except Exception:
-            pass
-
-    def _init_shortcuts(self) -> None:
-        # Global shortcut: F7 triggers recalibration request
-        self._shortcut_recal = QShortcut(QKeySequence("F7"), self.window)
-        self._shortcut_recal.setContext(Qt.ShortcutContext.ApplicationShortcut)
-        self._shortcut_recal.activated.connect(
-            lambda: self.signaller.recalibrate.emit()
-        )
-        # Local shortcut: F1 toggles visibility (useful during calibration mode)
-        try:
-            self._shortcut_toggle = QShortcut(QKeySequence("F1"), self.window)
-            self._shortcut_toggle.setContext(Qt.ShortcutContext.ApplicationShortcut)
-            self._shortcut_toggle.activated.connect(
-                lambda: self.signaller.toggle.emit()
-            )
-        except Exception:
-            pass
-        # Local shortcut: F10 exits application from the GUI
-        try:
-            self._shortcut_exit = QShortcut(QKeySequence("F10"), self.window)
-            self._shortcut_exit.setContext(Qt.ShortcutContext.ApplicationShortcut)
-            self._shortcut_exit.activated.connect(lambda: os._exit(0))
-        except Exception:
-            pass
-
-    # -------------------- Screen handling --------------------
-    def _on_screen_added(self, screen):
-        # When a new screen appears, hook its signals and re-anchor
-        try:
-            try:
-                screen.geometryChanged.connect(self.reposition)
-            except Exception:
-                pass
-            try:
-                screen.availableGeometryChanged.connect(self.reposition)
-            except Exception:
-                pass
-        finally:
-            self.reposition()
-
-    # -------------------- Status and visibility API --------------------
-    def _update_status(self, text: str):
-        # Update label text; runs in GUI thread because signal is connected
-        self.label.setText(text)
-        # Keep a plain-text copy for targeted line flash rendering
-        self._raw_label_text = text
-        # If a line is marked active, re-render the highlight on the new text
-        try:
-            if self._active_line_hotkey:
-                self._render_active_line(self._active_line_hotkey)
-        except Exception:
-            pass
-        # Re-anchor in case the text change affected layout/width
-        self.reposition()
-
-    def set_status(self, text: str):
-        # Public method for other threads to request a status update
-        self.signaller.status.emit(text)
-
-    def prompt_key_capture(self, prompt: str):
-        """Update the overlay to prompt the user for a key press.
-
-        This is non-blocking and simply updates the text shown on the
-        overlay; the HotkeyManager is responsible for performing the
-        actual global key capture.
-        """
-        self.set_status(f"{prompt}\nPress the desired key now...")
-
-    def on_recalibrate(self, slot):
-        """Connect a slot/callable to the F7 recalibration signal."""
-        self.signaller.recalibrate.connect(slot)
-
-    def on_start(self, slot):
-        """Connect a slot/callable to the calibration start signal."""
-        self.signaller.start.connect(slot)
-
-    # -------------------- Mode switching --------------------
-    def switch_to_main(self):
-        # Thread-safe wrapper to switch to main mode
-        self.signaller.switch_to_main.emit()
-
-    def _switch_to_main_ui(self):
-        """Switch the overlay visuals from calibration to main mode."""
-        try:
-            self.header_label.setText("<b>Gangware</b>")
-            self.base_status_color = "#00eaff"
-            self.label.setStyleSheet(f"color: {self.base_status_color};")
-            self.set_status("Status: Online")
-            # Hide start button if present
-            if hasattr(self, "start_button") and self.start_button:
-                self.start_button.hide()
-            # Enable click-through for main mode
-            self._configure_window_flags(click_through=True)
-            self.window.show()  # ensure flags take effect
-            self.reposition()
-            self._is_shown = True
-        except Exception:
-            # Do not let UI errors crash the application
-            pass
-
-    def switch_to_calibration(self):
-        # Thread-safe wrapper to switch to calibration mode
-        self.signaller.switch_to_calib.emit()
-
-    def _switch_to_calibration_ui(self):
-        """Switch the overlay visuals to calibration mode (not click-through)."""
-        try:
-            self.header_label.setText("<b>Gangware - Calibration</b>")
-            self.base_status_color = "#ff7a7a"
-            self.label.setStyleSheet(f"color: {self.base_status_color};")
-            # Disable click-through so shortcuts/UI remain responsive/visible
-            self._configure_window_flags(click_through=False)
-            self.window.show()
-            # Ensure it's visible when entering calibration during runtime
-            self.set_visible(True)
-            self.reposition()
-            self._is_shown = True
-        except Exception:
-            pass
-
-    def _set_visible(self, visible: bool):
-        # Runs in GUI thread via signal; immediate show/hide for reliability
-        try:
-            if visible:
-                self.window.setWindowOpacity(1.0)
-                self.window.show()
-                self.reposition()
-                self._is_shown = True
-            else:
-                self.window.hide()
-                self._is_shown = False
-        except Exception:
-            # Fallback to immediate show/hide on error
-            if visible:
-                try:
-                    self.window.show()
-                    self.reposition()
-                finally:
-                    self._is_shown = True
-            else:
-                try:
-                    self.window.hide()
-                finally:
-                    self._is_shown = False
-
-    def _toggle_visible(self):
-        self._set_visible(not self._is_shown)
-
-    def set_visible(self, visible: bool):
-        # Thread-safe setter for visibility
-        self.signaller.visibility.emit(visible)
-        # Update our local state optimistically; GUI thread will enforce
-        self._is_shown = bool(visible)
-
-    def toggle_visibility(self):
-        # Thread-safe toggle
-        self.signaller.toggle.emit()
-
-    # -------------------- Geometry & anchoring --------------------
-    def _get_top_right_geometry(self, width, height):
-        # Use availableGeometry to respect taskbars/docks and multi-monitor origins
-        screen = self.app.primaryScreen()
-        rect = getattr(screen, "availableGeometry", screen.geometry)()
-        x = rect.x() + rect.width() - width - 20
-        y = rect.y() + 20
-        return QRect(int(x), int(y), int(width), int(height))
-
-    def reposition(self):
-        """Anchor the window to the top-right of the current screen."""
-        handle = self.window.windowHandle()
-        screen = handle.screen() if handle is not None else self.app.primaryScreen()
-        rect = getattr(screen, "availableGeometry", screen.geometry)()
-        margin = 20
-        x = rect.x() + rect.width() - self.window.width() - margin
-        y = rect.y() + margin
-        self.window.move(int(x), int(y))
-
-    def show(self):
-        self.window.show()
-        # Schedule initial repositioning and fade-in after the event loop starts
-        QTimer.singleShot(0, self.reposition)
-        QTimer.singleShot(0, self._animate_fade_in)
-        self.app.exec()
-
-    # -------------------- Effects and feedback helpers --------------------
-    def _animate_fade_in(self, duration: int = 220):
-        try:
-            anim = QPropertyAnimation(self.window, b"windowOpacity")
-            anim.setDuration(duration)
-            anim.setStartValue(self.window.windowOpacity())
-            anim.setEndValue(1.0)
-            anim.setEasingCurve(QEasingCurve.Type.InOutQuad)
-            anim.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
-        except Exception:
-            pass
-
-    def _animate_fade_out(self, duration: int = 180):
-        try:
-            anim = QPropertyAnimation(self.window, b"windowOpacity")
-            anim.setDuration(duration)
-            anim.setStartValue(self.window.windowOpacity())
-            anim.setEndValue(0.0)
-            anim.setEasingCurve(QEasingCurve.Type.InOutQuad)
-
-            def _hide():
-                try:
-                    self.window.hide()
-                    self.window.setWindowOpacity(1.0)
-                except Exception:
-                    pass
-
-            anim.finished.connect(_hide)
-            anim.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
-        except Exception:
-            self.window.hide()
-
-    def _position_toast(self):
-        # Anchor toast near bottom within window margins
-        margin = 16
-        w = self.window.width() - margin * 2
-        self.toast.setGeometry(QRect(margin, self.window.height() - 48 - margin, w, 32))
-
-    def show_toast(self, text: str, duration_ms: int = 1800):
-        # Thread-safe wrapper
-        try:
-            self.signaller.toast.emit(text, duration_ms)
-        except Exception:
-            pass
-
-    def _show_toast_ui(self, text: str, duration_ms: int = 1800):
-        try:
-            self.toast.setText(text)
-            self._position_toast()
-            self.toast_effect.setOpacity(0.0)
-            self.toast.show()
-            # Fade in
-            fade_in = QPropertyAnimation(self.toast_effect, b"opacity")
-            fade_in.setDuration(180)
-            fade_in.setStartValue(0.0)
-            fade_in.setEndValue(1.0)
-            fade_in.setEasingCurve(QEasingCurve.Type.OutCubic)
-            # Fade out
-            fade_out = QPropertyAnimation(self.toast_effect, b"opacity")
-            fade_out.setDuration(300)
-            fade_out.setStartValue(1.0)
-            fade_out.setEndValue(0.0)
-            fade_out.setEasingCurve(QEasingCurve.Type.InCubic)
-
-            def _hide():
-                try:
-                    self.toast.hide()
-                except Exception:
-                    pass
-            fade_out.finished.connect(_hide)
-            # Chain animations via timers
-            fade_in.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
-            QTimer.singleShot(duration_ms, lambda: fade_out.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped))
-        except Exception:
-            pass
-
-    def show_success(self, text: str = "Success"):
-        # Flash border neon-green and show toast
-        try:
-            original = self.window.styleSheet()
-            self.window.setStyleSheet(
-                original + "\n border: 1px solid rgba(0,255,170,1.0);"
-            )
-            self.show_toast(text)
-            QTimer.singleShot(400, lambda: self.window.setStyleSheet(original))
-        except Exception:
-            pass
-
-    # -------------------- Success status flash --------------------
-    def success_flash(self, text: str | None = None, duration_ms: int = 1400):
-        """Public API: flash the status text green and fade back to base color.
-
-        Args:
-            text: Optional text to set during the flash; if None, keep current text.
-            duration_ms: Total fade duration back to the base color.
-        """
-        try:
-            self.signaller.success.emit(text or "", duration_ms)
-        except Exception:
-            pass
-
-    def _success_flash_ui(self, text: str, duration_ms: int):
-        try:
-            if text:
-                self.label.setText(text)
-            # Stop any ongoing fade
-            try:
-                if self._success_fade_timer is not None:
-                    self._success_fade_timer.stop()
-                    self._success_fade_timer.deleteLater()
-            except Exception:
-                pass
-            self._success_fade_timer = QTimer(self.window)
-
-            start_rgb = (0, 255, 170)  # neon green
-            end_rgb = self._hex_to_rgb(getattr(self, "base_status_color", "#00eaff"))
-            steps = max(8, min(40, int(duration_ms / 50)))
-            interval = max(16, int(duration_ms / steps))
-            idx = {"i": 0}
-
-            # Immediately set to green
-            self._set_label_color_rgb(*start_rgb)
-
-            def step():
-                i = idx["i"] + 1
-                t = i / steps
-                r = int(start_rgb[0] + (end_rgb[0] - start_rgb[0]) * t)
-                g = int(start_rgb[1] + (end_rgb[1] - start_rgb[1]) * t)
-                b = int(start_rgb[2] + (end_rgb[2] - start_rgb[2]) * t)
-                self._set_label_color_rgb(r, g, b)
-                idx["i"] = i
-                if i >= steps:
-                    try:
-                        self._success_fade_timer.stop()
-                        self._success_fade_timer.deleteLater()
-                    finally:
-                        self._success_fade_timer = None
-
-            self._success_fade_timer.timeout.connect(step)
-            self._success_fade_timer.start(interval)
-        except Exception:
-            # On failure, just set base color
-            try:
-                self.label.setStyleSheet(f"color: {getattr(self, 'base_status_color', '#00eaff')};")
-            except Exception:
-                pass
-
-    # -------------------- Targeted line success flash --------------------
-    def flash_hotkey_line(self, hotkey: str, duration_ms: int = 2400):
-        """Public API: temporarily highlight only the matching hotkey line.
-
-        Args:
-            hotkey: A label like 'F2', 'F3', 'F4', 'Shift+Q', 'Shift+E', 'Shift+R'.
-            duration_ms: Total fade duration back to the base color.
-        """
-        try:
-            self.signaller.flash_line.emit(hotkey, duration_ms)
-        except Exception:
-            pass
-
-    def _flash_line_ui(self, hotkey: str, duration_ms: int):
-        try:
-            raw = getattr(self, "_raw_label_text", self.label.text() or "")
-            lines = raw.splitlines()
-            # Find the line that starts with "- {hotkey}:"
-            target_index = -1
-            needle = f"- {hotkey}:".lower()
-            for i, ln in enumerate(lines):
-                if ln.strip().lower().startswith(needle):
-                    target_index = i
-                    break
-            if target_index < 0:
-                # No matching line; do nothing (avoid flashing whole label)
-                return
-
-            # Stop any ongoing line flash
-            try:
-                if self._line_flash_timer is not None:
-                    self._line_flash_timer.stop()
-                    self._line_flash_timer.deleteLater()
-            except Exception:
-                pass
-            self._line_flash_timer = QTimer(self.window)
-
-            start_rgb = (0, 255, 170)  # neon green
-            end_rgb = self._hex_to_rgb(getattr(self, "base_status_color", "#00eaff"))
-            # Smoother and slower fade
-            steps = max(12, min(60, int(duration_ms / 50)))
-            interval = max(16, int(duration_ms / steps))
-            idx = {"i": 0}
-
-            # Immediately render first state as green for the target line
-            html = self._build_highlighted_html(lines, target_index, self._rgb_to_hex(*start_rgb))
-            self.label.setText(html)
-
-            def step():
-                i = idx["i"] + 1
-                t = i / steps
-                r = int(start_rgb[0] + (end_rgb[0] - start_rgb[0]) * t)
-                g = int(start_rgb[1] + (end_rgb[1] - start_rgb[1]) * t)
-                b = int(start_rgb[2] + (end_rgb[2] - start_rgb[2]) * t)
-                html2 = self._build_highlighted_html(lines, target_index, self._rgb_to_hex(r, g, b))
-                self.label.setText(html2)
-                idx["i"] = i
-                if i >= steps:
-                    try:
-                        self._line_flash_timer.stop()
-                        self._line_flash_timer.deleteLater()
-                    finally:
-                        self._line_flash_timer = None
-                        # Restore plain text once fade completes
-                        self.label.setText(raw)
-
-            self._line_flash_timer.timeout.connect(step)
-            self._line_flash_timer.start(interval)
-        except Exception:
-            # On failure, do nothing
-            pass
-
-    def _build_highlighted_html(self, lines: list[str], target_index: int, color_hex: str) -> str:
-        # Use rich text with inline color for the target line only.
-        parts = []
-        for i, ln in enumerate(lines):
-            esc = self._html_escape(ln)
-            if i == target_index:
-                parts.append(f"<span style='color: {color_hex}; font-weight: bold'>{esc}</span>")
-            else:
-                parts.append(esc)
-        # Preserve line breaks
-        content = "<br>".join(parts)
-        return f"<div style='white-space: pre-wrap'>{content}</div>"
-
-    def _find_hotkey_line_index(self, hotkey: str, lines: list[str]) -> int:
-        needle = f"- {hotkey}:".lower()
-        for i, ln in enumerate(lines):
-            if ln.strip().lower().startswith(needle):
-                return i
-        return -1
-
-    def _render_active_line(self, hotkey: str, color_hex: str = "#00ffaa") -> None:
-        raw = getattr(self, "_raw_label_text", self.label.text() or "")
-        lines = raw.splitlines()
-        idx = self._find_hotkey_line_index(hotkey, lines)
-        if idx < 0:
+    def _hold_line_ui(self, hotkey: str) -> None:
+        lab = self._hotkey_labels.get(hotkey)
+        if not lab:
             return
-        html = self._build_highlighted_html(lines, idx, color_hex)
-        self.label.setText(html)
+        lab.setStyleSheet("border: 1px solid #00ffaa; color: #00ffaa; border-radius: 4px; padding: 3px 8px;")
 
-    def set_hotkey_line_active(self, hotkey: str):
-        try:
-            self.signaller.hold_line.emit(hotkey)
-        except Exception:
-            pass
+    def _clear_line_ui(self, hotkey: str, duration_ms: int) -> None:
+        # Delegate to _flash_line_ui to avoid duplicate implementation
+        self._flash_line_ui(hotkey, duration_ms)
 
-    def clear_hotkey_line_active(self, hotkey: str, fade_duration_ms: int = 2400):
-        try:
-            self.signaller.clear_line.emit(hotkey, fade_duration_ms)
-        except Exception:
-            pass
+    def _highlight_key_label(self, lab: QLabel, duration_ms: int) -> None:
+        steps = max(12, min(60, duration_ms // 40))
+        interval = max(16, duration_ms // steps)
+        i = {"v": 0}
 
-    def _hold_line_ui(self, hotkey: str):
-        try:
-            # Stop any ongoing flash and set active hotkey
-            try:
-                if self._line_flash_timer is not None:
-                    self._line_flash_timer.stop()
-                    self._line_flash_timer.deleteLater()
-            except Exception:
-                pass
-            self._line_flash_timer = None
-            self._active_line_hotkey = hotkey
-            self._render_active_line(hotkey, "#00ffaa")
-        except Exception:
-            pass
+        def step():
+            i["v"] += 1
+            t = i["v"] / steps
+            g = int(255 + (216 - 255) * t)
+            b = int(170 + (255 - 170) * t)
+            lab.setStyleSheet(
+                f"border: 1px solid rgba(0,216,255,{0.75 - 0.45 * t:.2f}); "
+                f"color: rgb(0,{g},{b}); border-radius: 4px; padding: 3px 8px;"
+            )
+            if i["v"] >= steps:
+                lab.setStyleSheet("")
+                timer.stop()
 
-    def _clear_line_ui(self, hotkey: str, duration_ms: int):
-        try:
-            if not self._active_line_hotkey or self._active_line_hotkey != hotkey:
-                return
-            raw = getattr(self, "_raw_label_text", self.label.text() or "")
-            lines = raw.splitlines()
-            target_index = self._find_hotkey_line_index(hotkey, lines)
-            if target_index < 0:
-                self._active_line_hotkey = None
-                self.label.setText(raw)
-                return
-            # Stop any ongoing flash
-            try:
-                if self._line_flash_timer is not None:
-                    self._line_flash_timer.stop()
-                    self._line_flash_timer.deleteLater()
-            except Exception:
-                pass
-            self._line_flash_timer = QTimer(self.window)
+        timer = QTimer(self.window)
+        timer.timeout.connect(step)
+        timer.start(interval)
 
-            start_rgb = (0, 255, 170)
-            end_rgb = self._hex_to_rgb(getattr(self, "base_status_color", "#00eaff"))
-            steps = max(12, min(60, int(duration_ms / 50)))
-            interval = max(16, int(duration_ms / steps))
-            idx_step = {"i": 0}
-
-            # Start at green and fade to base
-            html = self._build_highlighted_html(lines, target_index, self._rgb_to_hex(*start_rgb))
-            self.label.setText(html)
-
-            def step():
-                i = idx_step["i"] + 1
-                t = i / steps
-                r = int(start_rgb[0] + (end_rgb[0] - start_rgb[0]) * t)
-                g = int(start_rgb[1] + (end_rgb[1] - start_rgb[1]) * t)
-                b = int(start_rgb[2] + (end_rgb[2] - start_rgb[2]) * t)
-                html2 = self._build_highlighted_html(lines, target_index, self._rgb_to_hex(r, g, b))
-                self.label.setText(html2)
-                idx_step["i"] = i
-                if i >= steps:
-                    try:
-                        self._line_flash_timer.stop()
-                        self._line_flash_timer.deleteLater()
-                    finally:
-                        self._line_flash_timer = None
-                        self._active_line_hotkey = None
-                        self.label.setText(raw)
-
-            self._line_flash_timer.timeout.connect(step)
-            self._line_flash_timer.start(interval)
-        except Exception:
-            pass
+    # ---- Helpers ----
+    def _update_start_enabled(self) -> None:
+        inv_box: QLabel = getattr(self.inv_row, "_gw_display_box")  # type: ignore[attr-defined]
+        tek_box: QLabel = getattr(self.tek_row, "_gw_display_box")  # type: ignore[attr-defined]
+        tmpl_box: QLabel = getattr(self.tmpl_row, "_gw_display_box")  # type: ignore[attr-defined]
+        inv_ok = inv_box.text().strip() not in (self.NONE_DISPLAY, "[None]", "")
+        tek_ok = tek_box.text().strip() not in (self.NONE_DISPLAY, "[None]", "")
+        tmpl_ok = tmpl_box.text().strip().lower().startswith("[ captured")
+        self.btn_start.setEnabled(bool(inv_ok and tek_ok and tmpl_ok))
 
     @staticmethod
-    def _html_escape(text: str) -> str:
-        return (
-            text.replace("&", "&amp;")
-            .replace("<", "&lt;")
-            .replace(">", "&gt;")
-        )
-
-    def _set_label_color_rgb(self, r: int, g: int, b: int):
-        self.label.setStyleSheet(f"color: {self._rgb_to_hex(r, g, b)};")
-
-    @staticmethod
-    def _hex_to_rgb(h: str) -> tuple[int, int, int]:
-        h = h.lstrip('#')
-        if len(h) == 3:
-            h = ''.join([c*2 for c in h])
-        return tuple(int(h[i:i+2], 16) for i in (0, 2, 4))
-
-    @staticmethod
-    def _rgb_to_hex(r: int, g: int, b: int) -> str:
-        return f"#{r:02x}{g:02x}{b:02x}"
+    def _friendly_token(token: str) -> str:
+        t = (token or "").strip()
+        tl = t.lower()
+        if tl.startswith("key_"):
+            return t[4:]
+        if tl.startswith("mouse_"):
+            return t[6:]
+        return t or "?"

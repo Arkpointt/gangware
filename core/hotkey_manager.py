@@ -65,12 +65,19 @@ class HotkeyManager(threading.Thread):
       F2, F3, F4, Shift+Q, Shift+E, Shift+R
     """
 
-    def __init__(self, config_manager, task_queue, state_manager, overlay=None):
+    def __init__(self, config_manager, task_queue, state_manager, input_controller=None, overlay=None):
         super().__init__(daemon=True)
         self.config_manager = config_manager
         self.task_queue = task_queue
         self.state_manager = state_manager
+        self.input_controller = input_controller
         self.overlay = overlay
+        # Tek Dash timing constants
+        self._TEK_DASH_EST_DURATION = 0.9  # seconds
+        self._TEK_DASH_INPUT_WINDOW = 0.2  # seconds before expected end
+        # Medbrew HOT thread state
+        self._hot_thread: Optional[threading.Thread] = None
+        self._hot_stop_event = threading.Event()
         self._recalibrate_event = threading.Event()
         self._f1_down = False  # debounce for F1 toggle (polling fallback)
         self._f7_down = False  # debounce for F7 recalibration (polling fallback)
@@ -85,6 +92,26 @@ class HotkeyManager(threading.Thread):
         self._has_reg_f7 = False
         # Try to start a global hotkey message loop for robust handling
         self._start_hotkey_hook()
+        # Initialize Tek Dash state flags
+        try:
+            self.state_manager.set('tek_dash_busy', False)
+            self.state_manager.set('tek_dash_buffer', False)
+            self.state_manager.set('tek_dash_started_at', 0.0)
+            self.state_manager.set('tek_dash_est_duration', self._TEK_DASH_EST_DURATION)
+            self.state_manager.set('tek_dash_last_press_at', 0.0)
+        except Exception:
+            pass
+        # Wire overlay calibration panel events if available
+        try:
+            if self.overlay:
+                if hasattr(self.overlay, "on_capture_inventory"):
+                    self.overlay.on_capture_inventory(lambda: self._ui_capture_key("inventory_key", "Press your Inventory key (keyboard or mouse)", is_tek=False))
+                if hasattr(self.overlay, "on_capture_tek"):
+                    self.overlay.on_capture_tek(lambda: self._ui_capture_key("tek_punch_cancel_key", "Press your Tek Punch Cancel key (keyboard or mouse)", is_tek=True))
+                if hasattr(self.overlay, "on_capture_template"):
+                    self.overlay.on_capture_template(self._ui_capture_template)
+        except Exception:
+            pass
 
     # --------------------------- Thread entry ----------------------------
     def run(self):
@@ -110,23 +137,9 @@ class HotkeyManager(threading.Thread):
                     pass
             return
 
-        self._log("Waiting for Start to begin calibration")
-        self._poll_until_start_or_f7()
-        self._log("Starting calibration: capture keys and search bar template")
-        success = self.calibrate()
-        if not success:
-            self._log("Calibration aborted or failed")
-            return
-
-        self._log(self._MSG_CAL_DONE)
-        if self.overlay and hasattr(self.overlay, "switch_to_main"):
-            try:
-                self.overlay.switch_to_main()
-                self.overlay.set_status(self._menu_text())
-                if hasattr(self.overlay, "show_success"):
-                    self.overlay.show_success(self._MSG_CAL_DONE)
-            except Exception:
-                pass
+        # Show calibration panel and process until ready
+        self._show_calibration_menu("Calibration menu — use the buttons to capture each item, then click Start.")
+        self._run_cal_menu_until_start_and_ready()
 
     # --------------------------- Polling handlers ----------------------------
     def _maybe_exit_on_f10(self) -> None:
@@ -296,15 +309,15 @@ class HotkeyManager(threading.Thread):
 
         # Map IDs to handlers to reduce branching in the message loop
         self._hotkey_handlers = {
-            HK_F1: self._on_hotkey_f1,
-            HK_F7: self._on_hotkey_f7,
-            HK_F10: self._maybe_exit_on_f10,
-            HK_F2: lambda: self._handle_macro_hotkey(self._task_equip_armor("flak"), "F2"),
-            HK_F3: lambda: self._handle_macro_hotkey(self._task_equip_armor("tek"), "F3"),
-            HK_F4: lambda: self._handle_macro_hotkey(self._task_equip_armor("mixed"), "F4"),
-            HK_S_Q: lambda: self._handle_macro_hotkey(self._task_medbrew_burst(), "Shift+Q"),
-            HK_S_E: lambda: self._handle_macro_hotkey(self._task_medbrew_hot_toggle(), None),
-            HK_S_R: lambda: self._handle_macro_hotkey(self._task_tek_punch(), "Shift+R"),
+        HK_F1: self._on_hotkey_f1,
+        HK_F7: self._on_hotkey_f7,
+        HK_F10: self._maybe_exit_on_f10,
+        HK_F2: lambda: self._handle_macro_hotkey(self._task_equip_armor("flak"), "F2"),
+        HK_F3: lambda: self._handle_macro_hotkey(self._task_equip_armor("tek"), "F3"),
+        HK_F4: lambda: self._handle_macro_hotkey(self._task_equip_armor("mixed"), "F4"),
+        HK_S_Q: lambda: self._handle_macro_hotkey(self._task_medbrew_burst(), "Shift+Q"),
+        HK_S_E: self._on_hotkey_shift_e,
+        HK_S_R: self._on_hotkey_shift_r,
         }
 
     def _on_hotkey_f1(self) -> None:
@@ -385,6 +398,155 @@ class HotkeyManager(threading.Thread):
         except Exception:
             pass
 
+    def _on_hotkey_shift_e(self) -> None:
+        """Toggle Medbrew Heal-over-Time in a dedicated background thread."""
+        if not self._is_ark_active():
+            return
+        # If already running, request stop
+        t = getattr(self, "_hot_thread", None)
+        if t is not None and t.is_alive():
+            try:
+                self._hot_stop_event.set()
+            except Exception:
+                pass
+            return
+        # Otherwise, start a new HOT thread
+        self._start_hot_thread()
+
+    def _start_hot_thread(self) -> None:
+        if self.input_controller is None:
+            return
+        try:
+            self._hot_stop_event.clear()
+        except Exception:
+            pass
+        # Mark line active in overlay
+        try:
+            if self.overlay and hasattr(self.overlay, "set_hotkey_line_active"):
+                self.overlay.set_hotkey_line_active("Shift+E")
+        except Exception:
+            pass
+        def _run():
+            import time
+            total_duration = 22.5
+            interval = 1.5
+            presses = int(total_duration / interval) + 1
+            start = time.perf_counter()
+            i = 0
+            try:
+                while i < presses and not self._hot_stop_event.is_set():
+                    target = start + i * interval
+                    now = time.perf_counter()
+                    delay = target - now
+                    if delay > 0:
+                        # Wait in small slices to react to cancellation quickly
+                        end = now + delay
+                        while time.perf_counter() < end:
+                            if self._hot_stop_event.is_set():
+                                break
+                            time.sleep(min(0.05, end - time.perf_counter()))
+                    if self._hot_stop_event.is_set():
+                        break
+                    try:
+                        self.input_controller.press_key('0', presses=1)
+                    except Exception:
+                        pass
+                    i += 1
+            finally:
+                # Clear active line with nice fade
+                try:
+                    if self.overlay and hasattr(self.overlay, "clear_hotkey_line_active"):
+                        self.overlay.clear_hotkey_line_active("Shift+E", fade_duration_ms=2400)
+                except Exception:
+                    pass
+        t = threading.Thread(target=_run, daemon=True)
+        self._hot_thread = t
+        try:
+            t.start()
+        except Exception:
+            pass
+
+    def _on_hotkey_shift_r(self) -> None:
+        """Tek Dash input window buffering: only buffer within last 200ms of current run."""
+        if not self._is_ark_active():
+            return
+        # Record last press timestamp for worker-side input-window evaluation
+        try:
+            import time as _t
+            self.state_manager.set('tek_dash_last_press_at', _t.perf_counter())
+        except Exception:
+            pass
+        # Determine busy/pending state
+        try:
+            busy = bool(self.state_manager.get('tek_dash_busy', False))
+        except Exception:
+            busy = False
+        pending = self._is_task_pending(lambda t: self._is_tek_punch_task(t))
+        if not busy and not pending:
+            # Start a new dash immediately
+            try:
+                self.state_manager.set('tek_dash_busy', True)
+                # Clear any stale buffer
+                self.state_manager.set('tek_dash_buffer', False)
+                # Reset started_at; worker will set when actually starting
+                self.state_manager.set('tek_dash_started_at', 0.0)
+                self.state_manager.set('tek_dash_est_duration', self._TEK_DASH_EST_DURATION)
+            except Exception:
+                pass
+            try:
+                self.task_queue.put_nowait(self._task_tek_punch())
+                if self.overlay and hasattr(self.overlay, "flash_hotkey_line"):
+                    try:
+                        self.overlay.flash_hotkey_line("Shift+R")
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            return
+        # If busy (currently running), do nothing extra; worker will evaluate input-window using last_press timestamp
+        if busy:
+            return
+        # Not busy but pending in queue (not started yet): do nothing; worker will start soon
+        return
+
+    def _is_task_pending(self, predicate: Callable[[object], bool]) -> bool:
+        """Check if any queued task matches predicate, thread-safely if possible."""
+        q = getattr(self, "task_queue", None)
+        if q is None:
+            return False
+        try:
+            queue_attr = getattr(q, "queue", None)
+            mutex = getattr(q, "mutex", None)
+            if queue_attr is None or mutex is None:
+                try:
+                    items = list(q.queue)  # type: ignore[attr-defined]
+                except Exception:
+                    return False
+                return any(predicate(item) for item in items)
+            mutex.acquire()
+            try:
+                return any(predicate(item) for item in queue_attr)
+            finally:
+                mutex.release()
+        except Exception:
+            return False
+
+    @staticmethod
+    def _is_tek_punch_task(task_obj: object) -> bool:
+        try:
+            if callable(task_obj) and getattr(task_obj, "_gw_task_id", "") == "tek_punch":
+                return True
+            if isinstance(task_obj, dict):
+                label = str(task_obj.get("label", "")).lower()
+                name = str(task_obj.get("name", "")).lower()
+                if "tek" in label and "punch" in label:
+                    return True
+                if "tek" in name and "punch" in name:
+                    return True
+        except Exception:
+            pass
+        return False
+
     def _task_equip_armor(self, armor_set: str) -> Callable[[object, object], None]:
         def _job(vision_controller, input_controller):
             armor_swapper.execute(vision_controller, input_controller, armor_set)
@@ -396,9 +558,8 @@ class HotkeyManager(threading.Thread):
         return _job
 
     def _task_medbrew_hot_toggle(self) -> Callable[[object, object], None]:
-        # Separate handler to avoid identical implementation to burst
+        # Legacy path preserved but not used; HOT now runs in its own thread
         def _job(_vision_controller, input_controller):
-            # Pass overlay so the macro can hold the line green and fade after
             combat.execute_medbrew_hot_toggle(input_controller, self.overlay)
         return _job
 
@@ -406,6 +567,10 @@ class HotkeyManager(threading.Thread):
         def _job(_vision_controller, input_controller):
             # Pass config manager so macro can read tek_punch_cancel_key
             combat.execute_tek_punch(input_controller, self.config_manager)
+        try:
+            setattr(_job, "_gw_task_id", "tek_punch")
+        except Exception:
+            pass
         return _job
 
     # --------------------------- Recalibration orchestration ----------------------------
@@ -413,15 +578,8 @@ class HotkeyManager(threading.Thread):
         if not self._recalibrate_event.is_set():
             return
         self._log("Recalibration requested")
-        success = self.calibrate()
-        if success and self.overlay and hasattr(self.overlay, "switch_to_main"):
-            try:
-                self.overlay.switch_to_main()
-                self.overlay.set_status(self._menu_text())
-                if hasattr(self.overlay, "show_success"):
-                    self.overlay.show_success(self._MSG_CAL_DONE)
-            except Exception:
-                pass
+        self._show_calibration_menu("Calibration menu — use the buttons to capture each item, then click Start.")
+        self._run_cal_menu_until_start_and_ready()
         self._recalibrate_event.clear()
 
     # --------------------------- Calibration flow ----------------------------
@@ -437,6 +595,11 @@ class HotkeyManager(threading.Thread):
             return False
 
         try:
+            # Debounce F7 release before starting capture to avoid capturing F7 itself
+            try:
+                self._wait_key_release(0x76, 0.8)
+            except Exception:
+                pass
             # Ensure UI is in calibration state
             self._ensure_calibration_ui()
             # 1) Capture keys
@@ -572,6 +735,19 @@ class HotkeyManager(threading.Thread):
         }
         return special.get(vk, f"vk_{vk}")
 
+    def _wait_key_release(self, vk: int, timeout: float = 1.0) -> None:
+        if user32 is None:
+            return
+        import time as _t
+        end = _t.time() + max(0.0, float(timeout))
+        while _t.time() < end:
+            try:
+                if not bool(user32.GetAsyncKeyState(vk) & 0x8000):
+                    break
+            except Exception:
+                break
+            _t.sleep(0.02)
+
     def _capture_input_windows(self, prompt: str) -> Optional[str]:
         """Poll GetAsyncKeyState until a valid key or mouse button is pressed.
 
@@ -613,6 +789,10 @@ class HotkeyManager(threading.Thread):
                     pass
             finally:
                 os._exit(0)
+        # Ignore control hotkeys during calibration capture to avoid accidental selection
+        if name in ("F1", "F7", "F8"):
+            time.sleep(0.05)
+            return "__debounce__"
         # Left/right clicks are explicitly rejected
         if name in ("left", "right"):
             if self.overlay:
@@ -671,6 +851,128 @@ class HotkeyManager(threading.Thread):
         self.config_manager.config["DEFAULT"]["tek_punch_cancel_key"] = str(tek_key)
         self.config_manager.save()
 
+    def _save_key(self, name: str, value: str) -> None:
+        try:
+            self.config_manager.config["DEFAULT"][name] = str(value)
+            self.config_manager.save()
+        except Exception:
+            pass
+
+    # --------------------------- Calibration menu helpers ----------------------------
+    def _prefill_overlay_panel(self) -> None:
+        if not self.overlay:
+            return
+        try:
+            if hasattr(self.overlay, "set_captured_inventory"):
+                inv0 = self.config_manager.get("inventory_key")
+                if inv0:
+                    self.overlay.set_captured_inventory(inv0)
+            if hasattr(self.overlay, "set_captured_tek"):
+                tek0 = self.config_manager.get("tek_punch_cancel_key")
+                if tek0:
+                    self.overlay.set_captured_tek(tek0)
+            if hasattr(self.overlay, "set_template_status"):
+                tmpl0 = self.config_manager.get("search_bar_template")
+                self.overlay.set_template_status(bool(tmpl0), tmpl0 or None)
+        except Exception:
+            pass
+
+    def _show_calibration_menu(self, status: Optional[str] = None) -> None:
+        if not self.overlay:
+            return
+        try:
+            if hasattr(self.overlay, "set_visible"):
+                self.overlay.set_visible(True)
+            if hasattr(self.overlay, "switch_to_calibration"):
+                self.overlay.switch_to_calibration()
+            self._prefill_overlay_panel()
+            if status:
+                self.overlay.set_status(status)
+        except Exception:
+            pass
+
+    def _is_calibration_ready(self) -> bool:
+        inv = self.config_manager.get("inventory_key")
+        tek = self.config_manager.get("tek_punch_cancel_key")
+        tmpl = self.config_manager.get("search_bar_template")
+        return bool(inv and tek and tmpl)
+
+    def _complete_and_exit_calibration(self) -> None:
+        try:
+            self.config_manager.config["DEFAULT"]["calibration_complete"] = "True"
+            self.config_manager.save()
+        except Exception:
+            pass
+        if self.overlay and hasattr(self.overlay, "switch_to_main"):
+            try:
+                self.overlay.switch_to_main()
+                self.overlay.set_status(self._menu_text())
+                if hasattr(self.overlay, "show_success"):
+                    self.overlay.show_success(self._MSG_CAL_DONE)
+            except Exception:
+                pass
+
+    def _wait_for_start_only(self) -> None:
+        # Wait until the Start button sets the gate; ignore F7
+        try:
+            # Ensure we start from a clean state
+            self._calibration_gate.clear()
+        except Exception:
+            pass
+        while not self._calibration_gate.is_set():
+            self._maybe_exit_on_f10()
+            time.sleep(0.1)
+
+    def _run_cal_menu_until_start_and_ready(self) -> None:
+        while True:
+            self._wait_for_start_only()
+            if self._is_calibration_ready():
+                self._complete_and_exit_calibration()
+                break
+            if self.overlay:
+                try:
+                    self.overlay.set_status("Incomplete: set Inventory, Tek Cancel, and capture Template, then click Start.")
+                except Exception:
+                    pass
+            try:
+                self._calibration_gate.clear()
+            except Exception:
+                pass
+
+    # --------------------------- UI calibration handlers ----------------------------
+    def _ui_capture_key(self, key_name: str, prompt: str, is_tek: bool) -> None:
+        token = self._prompt_until_valid(prompt)
+        if not token or token == "__restart__":
+            return
+        self._save_key(key_name, token)
+        if self.overlay:
+            try:
+                if is_tek and hasattr(self.overlay, "set_captured_tek"):
+                    self.overlay.set_captured_tek(token)
+                elif not is_tek and hasattr(self.overlay, "set_captured_inventory"):
+                    self.overlay.set_captured_inventory(token)
+            except Exception:
+                pass
+
+    def _ui_capture_template(self) -> None:
+        if self.overlay:
+            try:
+                self.overlay.set_status("Open your inventory, hover the search bar, then press F8 to capture.")
+            except Exception:
+                pass
+        p = self._wait_and_capture_template()
+        ok = bool(p)
+        if ok:
+            try:
+                self._save_key("search_bar_template", str(p))
+            except Exception:
+                pass
+        if self.overlay and hasattr(self.overlay, "set_template_status"):
+            try:
+                self.overlay.set_template_status(ok, str(p) if p else None)
+            except Exception:
+                pass
+
     def _log(self, msg: str) -> None:
         # Small helper that updates overlay when available
         if self.overlay:
@@ -687,7 +989,7 @@ class HotkeyManager(threading.Thread):
                     self.overlay.set_visible(True)
                 if hasattr(self.overlay, "switch_to_calibration"):
                     self.overlay.switch_to_calibration()
-                self.overlay.set_status("Recalibration requested — follow on-screen prompts.")
+                self.overlay.set_status("Calibration menu — click buttons to capture Inventory, Tek Cancel, and Template (F8). Then click Start.")
         except Exception:
             pass
 

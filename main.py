@@ -51,7 +51,7 @@ def main() -> None:
     task_queue: queue.Queue = queue.Queue()
 
     # Start hotkey listener thread (pass overlay for status updates / calibration prompts)
-    hotkey_manager = HotkeyManager(config_manager, task_queue, state_manager, overlay=overlay)
+    hotkey_manager = HotkeyManager(config_manager, task_queue, state_manager, input_controller=input_controller, overlay=overlay)
     # Connect overlay shortcuts before starting threads to ensure signals are handled
     overlay.on_recalibrate(lambda: hotkey_manager.request_recalibration())
     overlay.on_start(lambda: hotkey_manager.allow_calibration_start())

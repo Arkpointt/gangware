@@ -27,6 +27,9 @@ class StatusSignaller(QObject):
     switch_to_calib = pyqtSignal()
     switch_to_main = pyqtSignal()
     success = pyqtSignal(str, int)
+    flash_line = pyqtSignal(str, int)
+    hold_line = pyqtSignal(str)
+    clear_line = pyqtSignal(str, int)
 
 
 class OverlayWindow:
@@ -51,6 +54,8 @@ class OverlayWindow:
         self._init_signaller()
         self._init_toast()
         self._success_fade_timer = None
+        self._line_flash_timer = None
+        self._active_line_hotkey = None
         # Ensure initial anchor after show/layout (scheduled on first show)
         # moved to show() to avoid QBasicTimer thread warnings before event loop
         # Optional Start button in calibration mode
@@ -156,6 +161,8 @@ class OverlayWindow:
             QRect(int(18 * self.scale), int(40 * self.scale), int(480 * self.scale), int(280 * self.scale))
         )
         self.label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        # Track the raw (plain text) content for selective line highlighting
+        self._raw_label_text = status_text
 
     def _init_signaller(self) -> None:
         self.signaller = StatusSignaller()
@@ -166,6 +173,9 @@ class OverlayWindow:
         self.signaller.switch_to_calib.connect(self._switch_to_calibration_ui)
         self.signaller.switch_to_main.connect(self._switch_to_main_ui)
         self.signaller.success.connect(self._success_flash_ui)
+        self.signaller.flash_line.connect(self._flash_line_ui)
+        self.signaller.hold_line.connect(self._hold_line_ui)
+        self.signaller.clear_line.connect(self._clear_line_ui)
 
     def _init_toast(self) -> None:
         # Toast notification (hidden by default)
@@ -286,6 +296,14 @@ class OverlayWindow:
     def _update_status(self, text: str):
         # Update label text; runs in GUI thread because signal is connected
         self.label.setText(text)
+        # Keep a plain-text copy for targeted line flash rendering
+        self._raw_label_text = text
+        # If a line is marked active, re-render the highlight on the new text
+        try:
+            if self._active_line_hotkey:
+                self._render_active_line(self._active_line_hotkey)
+        except Exception:
+            pass
         # Re-anchor in case the text change affected layout/width
         self.reposition()
 
@@ -564,6 +582,195 @@ class OverlayWindow:
                 self.label.setStyleSheet(f"color: {getattr(self, 'base_status_color', '#00eaff')};")
             except Exception:
                 pass
+
+    # -------------------- Targeted line success flash --------------------
+    def flash_hotkey_line(self, hotkey: str, duration_ms: int = 2400):
+        """Public API: temporarily highlight only the matching hotkey line.
+
+        Args:
+            hotkey: A label like 'F2', 'F3', 'F4', 'Shift+Q', 'Shift+E', 'Shift+R'.
+            duration_ms: Total fade duration back to the base color.
+        """
+        try:
+            self.signaller.flash_line.emit(hotkey, duration_ms)
+        except Exception:
+            pass
+
+    def _flash_line_ui(self, hotkey: str, duration_ms: int):
+        try:
+            raw = getattr(self, "_raw_label_text", self.label.text() or "")
+            lines = raw.splitlines()
+            # Find the line that starts with "- {hotkey}:"
+            target_index = -1
+            needle = f"- {hotkey}:".lower()
+            for i, ln in enumerate(lines):
+                if ln.strip().lower().startswith(needle):
+                    target_index = i
+                    break
+            if target_index < 0:
+                # No matching line; do nothing (avoid flashing whole label)
+                return
+
+            # Stop any ongoing line flash
+            try:
+                if self._line_flash_timer is not None:
+                    self._line_flash_timer.stop()
+                    self._line_flash_timer.deleteLater()
+            except Exception:
+                pass
+            self._line_flash_timer = QTimer(self.window)
+
+            start_rgb = (0, 255, 170)  # neon green
+            end_rgb = self._hex_to_rgb(getattr(self, "base_status_color", "#00eaff"))
+            # Smoother and slower fade
+            steps = max(12, min(60, int(duration_ms / 50)))
+            interval = max(16, int(duration_ms / steps))
+            idx = {"i": 0}
+
+            # Immediately render first state as green for the target line
+            html = self._build_highlighted_html(lines, target_index, self._rgb_to_hex(*start_rgb))
+            self.label.setText(html)
+
+            def step():
+                i = idx["i"] + 1
+                t = i / steps
+                r = int(start_rgb[0] + (end_rgb[0] - start_rgb[0]) * t)
+                g = int(start_rgb[1] + (end_rgb[1] - start_rgb[1]) * t)
+                b = int(start_rgb[2] + (end_rgb[2] - start_rgb[2]) * t)
+                html2 = self._build_highlighted_html(lines, target_index, self._rgb_to_hex(r, g, b))
+                self.label.setText(html2)
+                idx["i"] = i
+                if i >= steps:
+                    try:
+                        self._line_flash_timer.stop()
+                        self._line_flash_timer.deleteLater()
+                    finally:
+                        self._line_flash_timer = None
+                        # Restore plain text once fade completes
+                        self.label.setText(raw)
+
+            self._line_flash_timer.timeout.connect(step)
+            self._line_flash_timer.start(interval)
+        except Exception:
+            # On failure, do nothing
+            pass
+
+    def _build_highlighted_html(self, lines: list[str], target_index: int, color_hex: str) -> str:
+        # Use rich text with inline color for the target line only.
+        parts = []
+        for i, ln in enumerate(lines):
+            esc = self._html_escape(ln)
+            if i == target_index:
+                parts.append(f"<span style='color: {color_hex}; font-weight: bold'>{esc}</span>")
+            else:
+                parts.append(esc)
+        # Preserve line breaks
+        content = "<br>".join(parts)
+        return f"<div style='white-space: pre-wrap'>{content}</div>"
+
+    def _find_hotkey_line_index(self, hotkey: str, lines: list[str]) -> int:
+        needle = f"- {hotkey}:".lower()
+        for i, ln in enumerate(lines):
+            if ln.strip().lower().startswith(needle):
+                return i
+        return -1
+
+    def _render_active_line(self, hotkey: str, color_hex: str = "#00ffaa") -> None:
+        raw = getattr(self, "_raw_label_text", self.label.text() or "")
+        lines = raw.splitlines()
+        idx = self._find_hotkey_line_index(hotkey, lines)
+        if idx < 0:
+            return
+        html = self._build_highlighted_html(lines, idx, color_hex)
+        self.label.setText(html)
+
+    def set_hotkey_line_active(self, hotkey: str):
+        try:
+            self.signaller.hold_line.emit(hotkey)
+        except Exception:
+            pass
+
+    def clear_hotkey_line_active(self, hotkey: str, fade_duration_ms: int = 2400):
+        try:
+            self.signaller.clear_line.emit(hotkey, fade_duration_ms)
+        except Exception:
+            pass
+
+    def _hold_line_ui(self, hotkey: str):
+        try:
+            # Stop any ongoing flash and set active hotkey
+            try:
+                if self._line_flash_timer is not None:
+                    self._line_flash_timer.stop()
+                    self._line_flash_timer.deleteLater()
+            except Exception:
+                pass
+            self._line_flash_timer = None
+            self._active_line_hotkey = hotkey
+            self._render_active_line(hotkey, "#00ffaa")
+        except Exception:
+            pass
+
+    def _clear_line_ui(self, hotkey: str, duration_ms: int):
+        try:
+            if not self._active_line_hotkey or self._active_line_hotkey != hotkey:
+                return
+            raw = getattr(self, "_raw_label_text", self.label.text() or "")
+            lines = raw.splitlines()
+            target_index = self._find_hotkey_line_index(hotkey, lines)
+            if target_index < 0:
+                self._active_line_hotkey = None
+                self.label.setText(raw)
+                return
+            # Stop any ongoing flash
+            try:
+                if self._line_flash_timer is not None:
+                    self._line_flash_timer.stop()
+                    self._line_flash_timer.deleteLater()
+            except Exception:
+                pass
+            self._line_flash_timer = QTimer(self.window)
+
+            start_rgb = (0, 255, 170)
+            end_rgb = self._hex_to_rgb(getattr(self, "base_status_color", "#00eaff"))
+            steps = max(12, min(60, int(duration_ms / 50)))
+            interval = max(16, int(duration_ms / steps))
+            idx_step = {"i": 0}
+
+            # Start at green and fade to base
+            html = self._build_highlighted_html(lines, target_index, self._rgb_to_hex(*start_rgb))
+            self.label.setText(html)
+
+            def step():
+                i = idx_step["i"] + 1
+                t = i / steps
+                r = int(start_rgb[0] + (end_rgb[0] - start_rgb[0]) * t)
+                g = int(start_rgb[1] + (end_rgb[1] - start_rgb[1]) * t)
+                b = int(start_rgb[2] + (end_rgb[2] - start_rgb[2]) * t)
+                html2 = self._build_highlighted_html(lines, target_index, self._rgb_to_hex(r, g, b))
+                self.label.setText(html2)
+                idx_step["i"] = i
+                if i >= steps:
+                    try:
+                        self._line_flash_timer.stop()
+                        self._line_flash_timer.deleteLater()
+                    finally:
+                        self._line_flash_timer = None
+                        self._active_line_hotkey = None
+                        self.label.setText(raw)
+
+            self._line_flash_timer.timeout.connect(step)
+            self._line_flash_timer.start(interval)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _html_escape(text: str) -> str:
+        return (
+            text.replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+        )
 
     def _set_label_color_rgb(self, r: int, g: int, b: int):
         self.label.setStyleSheet(f"color: {self._rgb_to_hex(r, g, b)};")

@@ -3,6 +3,13 @@ Combat Macros
 Executes combat-related macros (e.g., Tek Punch).
 """
 
+import time
+from typing import Optional
+
+# The macro functions can optionally receive an overlay-like object that exposes
+# set_hotkey_line_active(hotkey: str) and clear_hotkey_line_active(hotkey: str, fade_duration_ms: int)
+# We pass overlay=None by default to avoid tight coupling.
+
 
 def execute_tek_punch(input_controller):
     """
@@ -33,15 +40,48 @@ def execute_medbrew_burst(input_controller):
         print("Medbrew Burst executed.")
 
 
-def execute_medbrew_hot_toggle(input_controller):
-    """Toggle a slow heal by using '0' once (placeholder for future stateful toggle).
+def execute_medbrew_hot_toggle(input_controller, overlay: Optional[object] = None):
+    """Heal-over-time effect: press '0' every 1.5s for 22.5s.
 
-    This is distinct from burst and kept minimal to avoid code duplication warnings.
+    Behavior:
+    - Immediately marks Shift+E line active (green) in the overlay if available.
+    - Presses '0' at 0.0s, 1.5s, ..., up to 22.5s (inclusive: 16 presses).
+    - After the loop, requests a slow fade-out of the Shift+E line.
     """
-    print("Executing Medbrew HOT toggle (0 x1)...")
+    HOTKEY_LABEL = "Shift+E"
+    total_duration = 22.5
+    interval = 1.5
+    presses = int(total_duration / interval) + 1  # include t=0 and t=22.5 -> 16
+
+    print(f"Executing Medbrew HOT over-time: 0 every {interval}s for {total_duration}s...")
+
+    # Mark line active in overlay
     try:
-        input_controller.press_key('0', presses=1)
+        if overlay and hasattr(overlay, "set_hotkey_line_active"):
+            overlay.set_hotkey_line_active(HOTKEY_LABEL)
+    except Exception:
+        pass
+
+    try:
+        start = time.perf_counter()
+        for i in range(presses):
+            # Schedule each press at start + i*interval
+            target = start + i * interval
+            now = time.perf_counter()
+            delay = target - now
+            if delay > 0:
+                time.sleep(delay)
+            try:
+                input_controller.press_key('0', presses=1)
+            except Exception as e:
+                print(f"Medbrew HOT press error at {i}: {e}")
     except Exception as e:
-        print(f"Medbrew HOT toggle error: {e}")
+        print(f"Medbrew HOT error: {e}")
     finally:
-        print("Medbrew HOT toggle executed.")
+        print("Medbrew HOT completed.")
+        try:
+            if overlay and hasattr(overlay, "clear_hotkey_line_active"):
+                # Slow fade to match the requested behavior
+                overlay.clear_hotkey_line_active(HOTKEY_LABEL, fade_duration_ms=2400)
+        except Exception:
+            pass

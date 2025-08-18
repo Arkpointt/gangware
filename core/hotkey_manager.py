@@ -1,11 +1,18 @@
-﻿"""
+
+"""
 Hotkey Manager Module
 Listens for hotkey commands and populates the task queue.
 
-This implementation adds a small calibration flow used to capture two
-user-specific keys: the Inventory key and the Tek Punch Cancel key. The
-captured values are written into the provided ConfigManager under the
-DEFAULT section as `inventory_key` and `tek_punch_cancel_key`.
+This implementation provides:
+- A calibration flow to capture user-specific keys: the Inventory key and the Tek Punch Cancel key.
+  The captured values are persisted into the provided ConfigManager under DEFAULT as
+  `inventory_key` and `tek_punch_cancel_key`.
+- Basic global hotkey handling on Windows using the Win32 API:
+  - F7 triggers a recalibration request (via the overlay shortcut)
+  - F1 toggles overlay visibility when available
+  - F10 exits the application (best-effort)
+
+The calibration key-capture uses the Windows GetAsyncKeyState polling to detect key/mouse input.
 """
 
 import threading
@@ -16,6 +23,7 @@ import os
 
 if sys.platform == "win32":
     import ctypes
+
     user32 = ctypes.windll.user32
 else:
     user32 = None
@@ -25,8 +33,8 @@ class HotkeyManager(threading.Thread):
     """Hotkey listener thread.
 
     The thread can run a calibration flow when the required keys are not
-    present in configuration. Calibration uses the `keyboard` package to
-    capture the next key press.
+    present in configuration. Calibration uses the Windows API to capture
+    the next key press.
     """
 
     def __init__(self, config_manager, task_queue, state_manager, overlay=None):
@@ -36,13 +44,13 @@ class HotkeyManager(threading.Thread):
         self.state_manager = state_manager
         self.overlay = overlay
         self._recalibrate_event = threading.Event()
+        self._f1_down = False  # debounce for F1 toggle
 
     def run(self):
         """Main loop for hotkey management.
 
-        For now this starts by ensuring calibration has been completed.
-        After calibration this method would normally register global
-        hotkeys and dispatch tasks; that part remains a placeholder.
+        Ensures calibration is completed, then enters a polling loop for a
+        minimal set of global hotkeys.
         """
         # If keys are missing, run calibration
         inv = self.config_manager.get("inventory_key")
@@ -55,7 +63,7 @@ class HotkeyManager(threading.Thread):
             else:
                 self._log("Calibration aborted or failed")
 
-        # Main hotkey loop placeholder + recalibration trigger
+        # Main hotkey loop + recalibration trigger
         while True:
             # Global exit (F10) on Windows
             try:
@@ -71,7 +79,25 @@ class HotkeyManager(threading.Thread):
                 # Never let hotkey polling crash the thread
                 pass
 
-            # Recalibration requested via F7
+            # F1 toggles overlay visibility (debounced)
+            try:
+                if user32 is not None:
+                    is_down = bool(user32.GetAsyncKeyState(0x70) & 0x8000)
+                    if is_down and not self._f1_down:
+                        # Rising edge
+                        self._f1_down = True
+                        try:
+                            if self.overlay and hasattr(self.overlay, "toggle_visibility"):
+                                self.overlay.toggle_visibility()
+                        except Exception:
+                            pass
+                    elif not is_down and self._f1_down:
+                        # Released
+                        self._f1_down = False
+            except Exception:
+                pass
+
+            # Recalibration requested via F7 (emitted from overlay shortcut)
             if self._recalibrate_event.is_set():
                 self._log("Recalibration requested")
                 success = self.calibrate()
@@ -81,6 +107,7 @@ class HotkeyManager(threading.Thread):
                     except Exception:
                         pass
                 self._recalibrate_event.clear()
+
             time.sleep(0.1)
 
     def calibrate(self) -> bool:
@@ -108,7 +135,9 @@ class HotkeyManager(threading.Thread):
             # Persist and notify
             self._save_calibration(inv_key, tek_key)
             if self.overlay:
-                self.overlay.set_status(f"Calibration saved: Inventory={inv_key}, TekCancel={tek_key}")
+                self.overlay.set_status(
+                    f"Calibration saved: Inventory={inv_key}, TekCancel={tek_key}"
+                )
             return True
         except Exception as exc:  # pragma: no cover - environment dependent
             self._log(f"Calibration failed: {exc}")
@@ -179,7 +208,7 @@ class HotkeyManager(threading.Thread):
         if name in ("left", "right"):
             if self.overlay:
                 self.overlay.set_status(
-                    "Left/Right click not allowed — use another button or a keyboard key."
+                    "Left/Right click not allowed ��� use another button or a keyboard key."
                 )
             time.sleep(0.2)
             return "__debounce__"

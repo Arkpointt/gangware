@@ -23,10 +23,16 @@ pip install -r requirements.txt
 python main.py
 ```
 
+Overlay behavior
+----------------
+- The overlay is always on top, click-through, and anchored to the top-right corner of the active screen.
+- It automatically repositions on resolution/DPI/monitor changes.
+- Press F1 to hide/unhide the overlay. F7 triggers recalibration.
+
 Notes
 -----
 - The overlay uses the Consolas font (default on Windows). If the font is not available, the system will fall back to a monospace font.
-- The overlay is designed to be click-through and non-invasive. If you need to interact with it during development, remove `Qt.WindowTransparentForInput` from `gui/overlay.py`.
+- To interact with the overlay during development, remove `Qt.WindowTransparentForInput` in `gui/overlay.py`.
 
 Aesthetics
 ---------

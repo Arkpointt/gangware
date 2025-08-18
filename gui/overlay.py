@@ -1,39 +1,45 @@
-﻿"""
+
+"""
 Overlay Window Module
 User interface overlay using PyQt6.
 
-This module exposes a small overlay window and a helper that the
-hotkey manager can use to prompt the user during calibration.
+Features:
+- Anchored to the top-right corner across resolution/monitor changes
+- Click-through, always-on-top translucent window with neon-styled UI
+- Thread-safe status updates via signals
+- F7 recalibration signal dispatch
+- Visibility controls: set_visible/toggle_visibility for F1 hotkey support
+- Calibration helper prompts (prompt_key_capture and switch_to_main)
 """
 
-from PyQt6.QtWidgets import QApplication, QWidget, QLabel
-from PyQt6.QtCore import Qt, QRect, QObject, pyqtSignal
-from PyQt6.QtGui import QFont, QShortcut, QKeySequence
+from PyQt6.QtWidgets import QApplication, QWidget, QLabel, QShortcut
+from PyQt6.QtCore import Qt, QRect, QObject, pyqtSignal, QTimer
+from PyQt6.QtGui import QFont, QKeySequence
 
 
 class StatusSignaller(QObject):
     status = pyqtSignal(str)
     recalibrate = pyqtSignal()
+    visibility = pyqtSignal(bool)
+    toggle = pyqtSignal()
 
 
 class OverlayWindow:
     def __init__(self, calibration_mode: bool = False, message: str | None = None):
+        # App and window
         self.app = QApplication([])
         self.window = QWidget()
         self.window.setWindowFlags(
-            Qt.WindowType.FramelessWindowHint |
-            Qt.WindowType.WindowStaysOnTopHint |
-            Qt.WindowType.Tool |
-            Qt.WindowType.WindowTransparentForInput
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.Tool
+            | Qt.WindowType.WindowTransparentForInput
         )
         self.window.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.window.setGeometry(self._get_top_right_geometry(360, 140))
         self.window.setStyleSheet(
             """
-            background: qlineargradient(
-                spread:pad, x1:0, y1:0, x2:1, y2:1,
-                stop:0 rgba(8,18,28,200), stop:1 rgba(18,38,58,180)
-            );
+            background: qlineargradient(spread:pad, x1:0, y1:0, x2:1, y2:1, stop:0 rgba(8,18,28,200), stop:1 rgba(18,38,58,180));
             border: 1px solid rgba(0,234,255,0.9);
             border-radius: 12px;
             font-family: 'Consolas', 'Courier New', monospace;
@@ -63,18 +69,67 @@ class OverlayWindow:
         self.label.setGeometry(QRect(18, 40, 320, 88))
         self.label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
 
-    # Signaller for thread-safe status updates
+        # Signaller for thread-safe status and visibility updates
         self.signaller = StatusSignaller()
         self.signaller.status.connect(self._update_status)
+        self.signaller.visibility.connect(self._set_visible)
+        self.signaller.toggle.connect(self._toggle_visible)
 
-    # Global shortcut: F7 triggers recalibration request
+        # Ensure initial anchor after show/layout and react to screen changes
+        QTimer.singleShot(0, self.reposition)
+
+        # React to monitor geometry/availability changes
+        try:
+            for screen in self.app.screens():
+                try:
+                    screen.geometryChanged.connect(self.reposition)
+                except Exception:
+                    pass
+                try:
+                    screen.availableGeometryChanged.connect(self.reposition)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        # React when the window moves between screens or primary screen changes
+        handle = self.window.windowHandle()
+        if handle is not None:
+            try:
+                handle.screenChanged.connect(lambda *_: self.reposition())
+            except Exception:
+                pass
+        try:
+            self.app.primaryScreenChanged.connect(lambda *_: self.reposition())
+            self.app.screenAdded.connect(self._on_screen_added)
+            self.app.screenRemoved.connect(lambda *_: self.reposition())
+        except Exception:
+            pass
+
+        # Global shortcut: F7 triggers recalibration request
         self._shortcut_recal = QShortcut(QKeySequence("F7"), self.window)
         self._shortcut_recal.setContext(Qt.ShortcutContext.ApplicationShortcut)
         self._shortcut_recal.activated.connect(lambda: self.signaller.recalibrate.emit())
 
+    def _on_screen_added(self, screen):
+        # When a new screen appears, hook its signals and re-anchor
+        try:
+            try:
+                screen.geometryChanged.connect(self.reposition)
+            except Exception:
+                pass
+            try:
+                screen.availableGeometryChanged.connect(self.reposition)
+            except Exception:
+                pass
+        finally:
+            self.reposition()
+
     def _update_status(self, text: str):
         # Update label text; runs in GUI thread because signal is connected
         self.label.setText(text)
+        # Re-anchor in case the text change affected layout/width
+        self.reposition()
 
     def set_status(self, text: str):
         # Public method for other threads to request a status update
@@ -103,11 +158,42 @@ class OverlayWindow:
             # Do not let UI errors crash the application
             pass
 
+    def _set_visible(self, visible: bool):
+        # Runs in GUI thread via signal; show/hide safely and re-anchor
+        if visible:
+            self.window.show()
+            self.reposition()
+        else:
+            self.window.hide()
+
+    def _toggle_visible(self):
+        self._set_visible(not self.window.isVisible())
+
+    def set_visible(self, visible: bool):
+        # Thread-safe setter for visibility
+        self.signaller.visibility.emit(visible)
+
+    def toggle_visibility(self):
+        # Thread-safe toggle
+        self.signaller.toggle.emit()
+
     def _get_top_right_geometry(self, width, height):
-        screen = self.app.primaryScreen().geometry()
-        x = screen.width() - width - 20
-        y = 20
-        return QRect(x, y, width, height)
+        # Use availableGeometry to respect taskbars/docks and multi-monitor origins
+        screen = self.app.primaryScreen()
+        rect = getattr(screen, "availableGeometry", screen.geometry)()
+        x = rect.x() + rect.width() - width - 20
+        y = rect.y() + 20
+        return QRect(int(x), int(y), int(width), int(height))
+
+    def reposition(self):
+        """Anchor the window to the top-right of the current screen."""
+        handle = self.window.windowHandle()
+        screen = handle.screen() if handle is not None else self.app.primaryScreen()
+        rect = getattr(screen, "availableGeometry", screen.geometry)()
+        margin = 20
+        x = rect.x() + rect.width() - self.window.width() - margin
+        y = rect.y() + margin
+        self.window.move(int(x), int(y))
 
     def show(self):
         self.window.show()

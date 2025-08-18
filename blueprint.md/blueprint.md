@@ -93,3 +93,25 @@ Objective: To develop the user-facing interface and the AI's self-analysis and d
 [ ] Integrate logging calls (INFO, DEBUG, ERROR) throughout all modules.
 
 [ ] Implement a "dry run" mode flag in the ConfigManager and Worker.
+
+Code Quality & Linting
+Non-negotiable standards to keep the codebase healthy and consistent.
+
+- Linter: flake8
+    - Configuration lives in `.flake8` at repo root.
+    - Max line length: 120 characters (enforced via `max-line-length = 120`).
+    - Ignore list: `E203, W503` (to align with common formatter behavior).
+- Editor enforcement:
+    - `.editorconfig` sets 4-space indentation, trims trailing whitespace, and enforces a final newline.
+    - `.vscode/settings.json` mirrors indent/whitespace rules to prevent reintroducing tabs or stray blanks.
+- CI/local checks:
+    - Build: `python -m compileall -q .`
+    - Lint: `flake8 . --max-line-length=120`
+    - Tests: `pytest -q` (at least smoke tests must pass).
+- Acceptance criteria for PRs:
+    - Zero flake8 errors or warnings.
+    - No lines > 120 chars (unless excluded by config).
+    - Tests green locally and in CI.
+
+Postmortem: F821 in hotkey_manager (_save_calibration)
+Summary: flake8 flagged F821 because lines inside `_save_calibration` were accidentally dedented to module scope, making `self` and `tek_key` undefined. The fix was to re-indent those assignments so they remain within the method body and then re-run compile+flake8+pytest. We’ll rely on `.editorconfig` and flake8 to prevent recurrence.

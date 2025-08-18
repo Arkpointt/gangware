@@ -277,7 +277,7 @@ class OverlayWindow(QMainWindow):
             name_lbl.setObjectName("item")
             h.addWidget(name_lbl)
             h.addStretch(1)
-            h.addWidget(Keycap(key))
+            h.addWidget(self._hotkey_button(key))
             v.addWidget(row)
 
         return frame
@@ -320,6 +320,15 @@ class OverlayWindow(QMainWindow):
         btn.setChecked(active)
         btn.setObjectName("tab")
         glow(btn, self.CYAN, 24, 90)
+        return btn
+
+    def _hotkey_button(self, text: str) -> QPushButton:
+        """Create a small-style disabled button to display hotkey text on Main page."""
+        btn = QPushButton(text)
+        btn.setObjectName("smallBtn")
+        btn.setEnabled(False)
+        btn.setCursor(Qt.CursorShape.ArrowCursor)
+        glow(btn, self.CYAN, 20, 100)
         return btn
 
     def _divider(self):

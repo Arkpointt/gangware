@@ -1,5 +1,7 @@
 Blueprint for the GANGWARE AI Assistant (v2)
 Changelog
+2025-08-18: Implemented global vs in-game hotkey logic (F1/F7/F10 global; F2/F3/F4/Shift+Q/E/R Ark-only). Hardened GUI threading by routing all UI operations through Qt signals to avoid QBasicTimer warnings. Refactored hotkey manager to reduce cognitive complexity and added diagnostics for hotkey registration failures.
+
 2025-08-17: Blueprint upgraded to a "Living Document" with a changelog, task checklists, and a system diagram for enhanced project management and clarity.
 
 2025-08-17: Initial blueprint creation.
@@ -30,88 +32,87 @@ graph TD;
         F -- Perceives --> H;
         D -- Updates --> I[GUI Overlay];
     end
+
+Notes:
+- Global hotkeys (F1/F7/F10) are registered via Win32 RegisterHotKey and have polling fallbacks. F1 toggles overlay visibility; F7 starts full calibration (keys + F8 capture); F10 exits.
+- Game-only hotkeys (F2/F3/F4/Shift+Q/E/R) enqueue tasks only when the ArkAscended.exe window is active (foreground process verified via Win32 APIs). Otherwise, a toast indicates the hotkey is Ark-only.
+- All GUI operations (toasts, visibility, mode switching) are executed on the GUI thread via Qt signals to ensure thread safety.
+
 Phase 1: Foundation - The Sensory and Motor Cortex
-Objective: To build the AI's core abilities to see and interact with the game world.
+Objective: Build core abilities to see and interact with the game world.
 
-[ ] Module: Vision System (vision.py)
+[x] Module: Vision System (vision.py)
+    [x] Create VisionController class.
+    [x] Implement find_template using OpenCV.
+    [x] Add error handling when templates are not found.
 
-[ ] Create VisionController class.
+[x] Module: Control System (controls.py)
+    [x] Create InputController class.
+    [x] Implement mouse movement, clicking, and typing via pydirectinput.
 
-[ ] Implement find_template method using OpenCV.
-
-[ ] Add error handling for when templates are not found.
-
-[ ] Module: Control System (controls.py)
-
-[ ] Create InputController class.
-
-[ ] Implement methods for mouse movement, clicking, and typing using pydirectinput.
-
-[ ] Module: Configuration Core (config.py)
-
-[ ] Create ConfigManager class.
-
-[ ] Implement methods to load, get, and save settings from config.ini.
+[x] Module: Configuration Core (config.py)
+    [x] Create ConfigManager class.
+    [x] Implement load/get/save of settings (config.ini).
 
 Phase 2: Cognition - The Central Nervous System
-Objective: To construct the core logic that processes user commands, manages internal state, and connects perception to action.
+Objective: Process user commands, manage internal state, and connect perception to action.
 
-[ ] Module: State & Task Management
-
-[ ] Implement the thread-safe StateManager class in state.py.
-
-[ ] Implement the HotkeyManager thread in hotkey_manager.py to listen for commands and populate the task queue.
-
-[ ] Implement the Worker thread in worker.py to process tasks from the queue.
+[x] Module: State & Task Management
+    [x] Implement thread-safe StateManager (state.py).
+    [x] Implement HotkeyManager thread (core/hotkey_manager.py).
+    [x] Implement Worker thread (core/worker.py) to process queued tasks.
 
 Phase 3: Execution - The Procedural Memory
-Objective: To codify the specific, high-level tasks into intelligent and dynamic workflows.
+Objective: Codify high-level tasks into intelligent workflows.
 
-[ ] Module: Macro Library (macros/)
-
-[ ] Create the armor_swapper.py module.
-
-[ ] Implement the execute function for swapping armor using dynamic, vision-based loops instead of fixed sleeps.
-
-[ ] Create combat.py for other macros (Tek Punch, etc.).
+[x] Module: Macro Library (macros/)
+    [x] Create armor_swapper.py.
+    [x] Implement execute() for swapping armor using template matching (Vision + Input).
+    [x] Create combat.py for Tek Punch and Medbrew Burst.
+    [ ] Future: Implement a real Medbrew HOT toggle (placeholder currently reuses burst).
 
 Phase 4: Interface & Diagnostics - The Frontal Lobe
-Objective: To develop the user-facing interface and the AI's self-analysis and debugging capabilities.
+Objective: Develop the UI and diagnostics.
 
-[ ] Module: User Interface (gui/overlay.py)
-
-[ ] Create the OverlayWindow class using PyQt6.
-
-[ ] Design the UI to be frameless, on-top, and themed.
-
-[ ] Implement a signal/slot system for safe, cross-thread UI updates.
+[x] Module: User Interface (gui/overlay.py)
+    [x] Create OverlayWindow with PyQt6.
+    [x] Frameless, on-top themed overlay with top-right anchoring.
+    [x] Signal/slot system for safe, cross-thread UI updates.
+    [x] Thread-safe methods: set_status, show_toast, switch_to_main, switch_to_calibration, visibility toggle.
 
 [ ] Module: Self-Analysis & Logging
-
-[ ] Configure the global logging setup in main.py.
-
-[ ] Integrate logging calls (INFO, DEBUG, ERROR) throughout all modules.
-
-[ ] Implement a "dry run" mode flag in the ConfigManager and Worker.
+    [ ] Configure global logging in main.py.
+    [ ] Integrate logging calls (INFO, DEBUG, ERROR) across modules (replace prints gradually).
+    [ ] Implement a "dry run" mode flag in ConfigManager and respected in Worker/macros.
 
 Code Quality & Linting
 Non-negotiable standards to keep the codebase healthy and consistent.
 
 - Linter: flake8
-    - Configuration lives in `.flake8` at repo root.
-    - Max line length: 120 characters (enforced via `max-line-length = 120`).
-    - Ignore list: `E203, W503` (to align with common formatter behavior).
+    - Configuration in `.flake8` (max-line-length=120; ignore E203, W503).
 - Editor enforcement:
-    - `.editorconfig` sets 4-space indentation, trims trailing whitespace, and enforces a final newline.
-    - `.vscode/settings.json` mirrors indent/whitespace rules to prevent reintroducing tabs or stray blanks.
+    - `.editorconfig` sets 4-space indentation, trims trailing whitespace, enforces final newline.
 - CI/local checks:
     - Build: `python -m compileall -q .`
     - Lint: `flake8 . --max-line-length=120`
-    - Tests: `pytest -q` (at least smoke tests must pass).
+    - Tests: `pytest -q` (smoke tests at minimum).
 - Acceptance criteria for PRs:
     - Zero flake8 errors or warnings.
-    - No lines > 120 chars (unless excluded by config).
-    - Tests green locally and in CI.
+    - No lines > 120 chars (unless excluded).
+    - All tests green.
 
 Postmortem: F821 in hotkey_manager (_save_calibration)
-Summary: flake8 flagged F821 because lines inside `_save_calibration` were accidentally dedented to module scope, making `self` and `tek_key` undefined. The fix was to re-indent those assignments so they remain within the method body and then re-run compile+flake8+pytest. We’ll rely on `.editorconfig` and flake8 to prevent recurrence.
+Summary: flake8 flagged F821 because lines inside `_save_calibration` were accidentally dedented to module scope, making `self` and `tek_key` undefined. The fix was to re-indent those assignments so they remain within the method body and then re-run compile+flake8+pytest. `.editorconfig` and flake8 help prevent recurrence.
+
+Pre-commit checklist (current release)
+- [x] Unit tests: `pytest -q` pass locally.
+- [x] Cognitive complexity warnings addressed for hotkey_manager and overlay.
+- [x] GUI thread-safety validated (no QBasicTimer warnings during hotkey usage).
+- [x] Global vs in-game hotkeys implemented and tested.
+- [x] Blueprint updated to reflect current architecture and status.
+- [ ] Logging: planned for next iteration; current prints in macros are placeholders.
+
+Known follow-ups
+- Replace `print()` calls in macros and worker with structured logging once logging is configured.
+- Implement a true Medbrew HOT toggle.
+- Expand tests to cover hotkey edge cases, Ark window detection, and overlay signal pathways.

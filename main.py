@@ -52,6 +52,9 @@ def main() -> None:
 
     # Start hotkey listener thread (pass overlay for status updates / calibration prompts)
     hotkey_manager = HotkeyManager(config_manager, task_queue, state_manager, overlay=overlay)
+    # Connect overlay shortcuts before starting threads to ensure signals are handled
+    overlay.on_recalibrate(lambda: hotkey_manager.request_recalibration())
+    overlay.on_start(lambda: hotkey_manager.allow_calibration_start())
     hotkey_manager.start()
 
     # Start worker thread (pass overlay for status updates)
@@ -65,10 +68,7 @@ def main() -> None:
     )
     worker.start()
 
-    # Connect F7 (overlay) to hotkey manager recalibration
-    overlay.on_recalibrate(lambda: hotkey_manager.request_recalibration())
-    overlay.on_start(lambda: hotkey_manager.allow_calibration_start())
-
+    
     # Optional UI demo task
     ui_demo = config_manager.get("ui_demo", fallback="False") == "True"
     if ui_demo:

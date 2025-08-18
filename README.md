@@ -28,7 +28,7 @@ Calibration flow (Windows)
 If calibration is not complete, the overlay will guide you through these steps:
 1) Press your Inventory key (keyboard or mouse). Left/Right mouse buttons are not allowed. Middle/X buttons are accepted.
 2) Press your Tek Punch Cancel key (keyboard or mouse). Same restrictions as above.
-3) Open your inventory, hover the search bar, and press F8 to capture a small template image. The template is saved to `assets/templates/search_bar.png` and its path recorded in the config.
+3) Open your inventory, hover the search bar, and press F8 to capture a small template image. The template is saved to `%APPDATA%/Gangware/templates/search_bar.png` (per-user) and its absolute path recorded in the config.
 
 Calibration is marked complete only after the template is captured and saved.
 

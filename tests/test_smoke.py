@@ -1,7 +1,7 @@
 """Minimal smoke tests to ensure modules import and core managers work."""
 
-from core.config import ConfigManager
-from core.state import StateManager
+from src.gangware.core.config import ConfigManager
+from src.gangware.core.state import StateManager
 
 
 def test_config_defaults_and_save(tmp_path, monkeypatch):

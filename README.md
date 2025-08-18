@@ -5,6 +5,20 @@ Overview
 --------
 Gangware is a modular Python application for real-time visual process automation, inspired by Ark: Ascended aesthetics.
 
+Project Structure
+-----------------
+The project follows a professional src layout:
+
+```
+src/
+└── gangware/              # Main application package
+    ├── core/             # Core functionality (config, state, etc.)
+    ├── controllers/      # Input and vision controllers
+    ├── gui/             # User interface components
+    ├── macros/          # Automation macros
+    └── main.py          # Application entry point
+```
+
 Quick start
 -----------
 1. Create and activate a virtual environment (PowerShell):
@@ -21,6 +35,12 @@ pip install -r requirements.txt
 
 ```powershell
 python main.py
+```
+
+Or alternatively use the batch script:
+
+```powershell
+.\run.bat
 ```
 
 Calibration flow (Windows)

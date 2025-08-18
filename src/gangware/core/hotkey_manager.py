@@ -32,7 +32,7 @@ import numpy as np  # type: ignore
 import ctypes
 
 # Macro libraries
-from macros import armor_swapper, combat
+from ..macros import armor_swapper, combat
 
 if sys.platform == "win32":
     from ctypes import wintypes

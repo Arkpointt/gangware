@@ -51,6 +51,7 @@ class ConfigManager:
             "calibration_complete": "False",
             "inventory_key": "",
             "tek_punch_cancel_key": "",
+            "search_bar_template": "",
             "ui_demo": "False",
         }
         self.save()

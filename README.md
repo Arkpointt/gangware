@@ -23,11 +23,20 @@ pip install -r requirements.txt
 python main.py
 ```
 
+Calibration flow (Windows)
+--------------------------
+If calibration is not complete, the overlay will guide you through these steps:
+1) Press your Inventory key (keyboard or mouse). Left/Right mouse buttons are not allowed. Middle/X buttons are accepted.
+2) Press your Tek Punch Cancel key (keyboard or mouse). Same restrictions as above.
+3) Open your inventory, hover the search bar, and press F8 to capture a small template image. The template is saved to `assets/templates/search_bar.png` and its path recorded in the config.
+
+Calibration is marked complete only after the template is captured and saved.
+
 Overlay behavior
 ----------------
 - The overlay is always on top, click-through, and anchored to the top-right corner of the active screen.
 - It automatically repositions on resolution/DPI/monitor changes.
-- Press F1 to hide/unhide the overlay. F7 triggers recalibration.
+- Press F1 to hide/unhide the overlay. Press F7 to recalibrate at any time (global or via overlay).
 
 Notes
 -----

@@ -1,4 +1,4 @@
-"""core.config
+﻿"""core.config
 Configuration core: load/save helpers for config.ini.
 
 This module provides a tiny ConfigManager used by the application to read
@@ -47,6 +47,7 @@ class ConfigManager:
             "log_level": "INFO",
             "dry_run": "False",
             "resolution": "1920x1080",
+            "ui_theme": "dark",
             "calibration_complete": "False",
             "inventory_key": "",
             "tek_punch_cancel_key": "",

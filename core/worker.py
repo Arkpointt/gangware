@@ -1,4 +1,4 @@
-"""
+﻿"""
 Worker Thread Module
 Processes tasks from the queue.
 """
@@ -71,6 +71,7 @@ class Worker(threading.Thread):
                     # If it's a callable, call it directly
                     if callable(self.status_callback):
                         self.status_callback(text)
+
         except Exception:
             # Swallow errors from status updates to avoid crashing worker
             pass

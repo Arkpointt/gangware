@@ -1,4 +1,4 @@
-"""
+﻿"""
 State & Task Management Module
 Handles internal state and task queue.
 """

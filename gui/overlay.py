@@ -1,4 +1,4 @@
-"""
+﻿"""
 Overlay Window Module
 User interface overlay using PyQt6.
 
@@ -8,11 +8,12 @@ hotkey manager can use to prompt the user during calibration.
 
 from PyQt6.QtWidgets import QApplication, QWidget, QLabel
 from PyQt6.QtCore import Qt, QRect, QObject, pyqtSignal
-from PyQt6.QtGui import QFont
+from PyQt6.QtGui import QFont, QShortcut, QKeySequence
 
 
 class StatusSignaller(QObject):
     status = pyqtSignal(str)
+    recalibrate = pyqtSignal()
 
 
 class OverlayWindow:
@@ -62,9 +63,14 @@ class OverlayWindow:
         self.label.setGeometry(QRect(18, 40, 320, 88))
         self.label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
 
-        # Signaller for thread-safe status updates
+    # Signaller for thread-safe status updates
         self.signaller = StatusSignaller()
         self.signaller.status.connect(self._update_status)
+
+    # Global shortcut: F7 triggers recalibration request
+        self._shortcut_recal = QShortcut(QKeySequence("F7"), self.window)
+        self._shortcut_recal.setContext(Qt.ShortcutContext.ApplicationShortcut)
+        self._shortcut_recal.activated.connect(lambda: self.signaller.recalibrate.emit())
 
     def _update_status(self, text: str):
         # Update label text; runs in GUI thread because signal is connected
@@ -82,6 +88,20 @@ class OverlayWindow:
         actual global key capture.
         """
         self.set_status(f"{prompt}\nPress the desired key now...")
+
+    def on_recalibrate(self, slot):
+        """Connect a slot/callable to the F7 recalibration signal."""
+        self.signaller.recalibrate.connect(slot)
+
+    def switch_to_main(self):
+        """Switch the overlay visuals from calibration to main mode."""
+        try:
+            self.header_label.setText("<b>GANGWARE AI</b>")
+            self.label.setStyleSheet("color: #00eaff;")
+            self.set_status("Status: Online")
+        except Exception:
+            # Do not let UI errors crash the application
+            pass
 
     def _get_top_right_geometry(self, width, height):
         screen = self.app.primaryScreen().geometry()

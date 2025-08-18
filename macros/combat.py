@@ -1,4 +1,4 @@
-"""
+﻿"""
 Combat Macros
 Executes combat-related macros (e.g., Tek Punch).
 """

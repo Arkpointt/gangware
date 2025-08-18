@@ -1,4 +1,4 @@
-"""
+﻿"""
 Hotkey Manager Module
 Listens for hotkey commands and populates the task queue.
 
@@ -12,6 +12,7 @@ import threading
 import time
 from typing import Optional
 import sys
+import os
 
 if sys.platform == "win32":
     import ctypes
@@ -34,6 +35,7 @@ class HotkeyManager(threading.Thread):
         self.task_queue = task_queue
         self.state_manager = state_manager
         self.overlay = overlay
+        self._recalibrate_event = threading.Event()
 
     def run(self):
         """Main loop for hotkey management.
@@ -53,9 +55,33 @@ class HotkeyManager(threading.Thread):
             else:
                 self._log("Calibration aborted or failed")
 
-        # Main hotkey loop placeholder
+        # Main hotkey loop placeholder + recalibration trigger
         while True:
-            time.sleep(1)
+            # Global exit (F10) on Windows
+            try:
+                if user32 is not None and (user32.GetAsyncKeyState(0x79) & 0x8000):
+                    self._log("F10 pressed — exiting application")
+                    try:
+                        # Try to stop the worker thread gracefully
+                        self.task_queue.put_nowait(None)
+                    except Exception:
+                        pass
+                    os._exit(0)
+            except Exception:
+                # Never let hotkey polling crash the thread
+                pass
+
+            # Recalibration requested via F7
+            if self._recalibrate_event.is_set():
+                self._log("Recalibration requested")
+                success = self.calibrate()
+                if success and self.overlay and hasattr(self.overlay, "switch_to_main"):
+                    try:
+                        self.overlay.switch_to_main()
+                    except Exception:
+                        pass
+                self._recalibrate_event.clear()
+            time.sleep(0.1)
 
     def calibrate(self) -> bool:
         """Run interactive calibration capturing two key presses.
@@ -181,10 +207,16 @@ class HotkeyManager(threading.Thread):
                 continue
             return token
 
+    def request_recalibration(self) -> None:
+        """External trigger (e.g., GUI) to request recalibration on the hotkey thread."""
+        self._recalibrate_event.set()
+
     def _save_calibration(self, inv_key: str, tek_key: str) -> None:
         """Persist captured calibration keys into the config manager."""
         self.config_manager.config["DEFAULT"]["inventory_key"] = str(inv_key)
         self.config_manager.config["DEFAULT"]["tek_punch_cancel_key"] = str(tek_key)
+        # Mark calibration complete so the app doesn't block on next startup
+        self.config_manager.config["DEFAULT"]["calibration_complete"] = "True"
         self.config_manager.save()
 
     def _log(self, msg: str) -> None:
@@ -193,5 +225,3 @@ class HotkeyManager(threading.Thread):
             self.overlay.set_status(msg)
         else:
             print(msg)
-
-

@@ -1,4 +1,4 @@
-"""
+﻿"""
 Armor Swapper Macro
 Executes armor swapping using vision-based loops.
 """

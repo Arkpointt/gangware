@@ -1,4 +1,4 @@
-"""Vision helpers used by the app.
+﻿"""Vision helpers used by the app.
 
 Provides a small VisionController that captures the primary monitor and
 performs template matching using OpenCV. Kept minimal for testability.
@@ -43,20 +43,3 @@ class VisionController:
         center_x = max_loc[0] + t_width // 2
         center_y = max_loc[1] + t_height // 2
         return center_x, center_y
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

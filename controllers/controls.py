@@ -1,6 +1,4 @@
-
-"""
-Control System Module
+﻿"""Control System Module
 Handles all input automation tasks.
 """
 

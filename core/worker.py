@@ -32,34 +32,50 @@ class Worker(threading.Thread):
         """Main loop for processing tasks from the queue."""
         while True:
             try:
-                # Get next task (blocking)
                 task = self.task_queue.get()
                 if task is None:
-                    break  # Allow graceful shutdown
-                # Process the task
-                self._set_status(f"Processing task: {str(task)}")
+                    break
+                self._display_task_status(task)
                 try:
-                    # If task is a callable, call it with controllers
-                    if callable(task):
-                        task(self.vision_controller, self.input_controller)
-                    elif isinstance(task, dict):
-                        action = task.get('action')
-                        if callable(action):
-                            args = task.get('args', [])
-                            kwargs = task.get('kwargs', {})
-                            action(*args, **kwargs)
-                        else:
-                            # Unknown task format
-                            self._set_status(f"Unknown task action: {action}")
-                    else:
-                        self._set_status("Unsupported task type")
+                    # For labeled tasks, trigger a subtle success flash in the UI at start
+                    if isinstance(task, dict) and 'label' in task and hasattr(self.status_callback, 'success_flash'):
+                        try:
+                            self.status_callback.success_flash(task['label'])
+                        except Exception:
+                            pass
+                    self._execute_task(task)
                 except Exception as e:
                     self._set_status(f"Task error: {e}")
                 finally:
                     self.task_queue.task_done()
             except Exception as e:
-                # Log or handle errors
                 print(f"Worker error: {e}")
+
+    def _display_task_status(self, task):
+        try:
+            # Suppress status for callables (macros) and labeled tasks
+            if callable(task):
+                return
+            if isinstance(task, dict) and "label" in task:
+                return
+            self._set_status(f"Processing task: {str(task)}")
+        except Exception:
+            pass
+
+    def _execute_task(self, task):
+        if callable(task):
+            task(self.vision_controller, self.input_controller)
+            return
+        if isinstance(task, dict):
+            action = task.get('action')
+            if callable(action):
+                args = task.get('args', [])
+                kwargs = task.get('kwargs', {})
+                action(*args, **kwargs)
+                return
+            self._set_status(f"Unknown task action: {action}")
+            return
+        self._set_status("Unsupported task type")
 
     def _set_status(self, text: str):
         try:

@@ -299,28 +299,18 @@ class HotkeyManager(threading.Thread):
             HK_F1: self._on_hotkey_f1,
             HK_F7: self._on_hotkey_f7,
             HK_F10: self._maybe_exit_on_f10,
-            HK_F2: lambda: self._handle_macro_hotkey(self._task_equip_armor("flak"), "Equip Flak"),
-            HK_F3: lambda: self._handle_macro_hotkey(self._task_equip_armor("tek"), "Equip Tek"),
-            HK_F4: lambda: self._handle_macro_hotkey(self._task_equip_armor("mixed"), "Equip Mixed"),
-            HK_S_Q: lambda: self._handle_macro_hotkey(self._task_medbrew_burst(), "Medbrew Burst"),
-            HK_S_E: lambda: self._handle_macro_hotkey(self._task_medbrew_hot_toggle(), "Medbrew HOT Toggle"),
-            HK_S_R: lambda: self._handle_macro_hotkey(self._task_tek_punch(), "Tek Punch"),
+            HK_F2: lambda: self._handle_macro_hotkey(self._task_equip_armor("flak")),
+            HK_F3: lambda: self._handle_macro_hotkey(self._task_equip_armor("tek")),
+            HK_F4: lambda: self._handle_macro_hotkey(self._task_equip_armor("mixed")),
+            HK_S_Q: lambda: self._handle_macro_hotkey(self._task_medbrew_burst()),
+            HK_S_E: lambda: self._handle_macro_hotkey(self._task_medbrew_hot_toggle()),
+            HK_S_R: lambda: self._handle_macro_hotkey(self._task_tek_punch()),
         }
 
     def _on_hotkey_f1(self) -> None:
-        try:
-            if self.overlay and hasattr(self.overlay, "show_toast"):
-                self.overlay.show_toast("F1: Toggle overlay")
-        except Exception:
-            pass
         self._toggle_overlay_visibility()
 
     def _on_hotkey_f7(self) -> None:
-        try:
-            if self.overlay and hasattr(self.overlay, "show_toast"):
-                self.overlay.show_toast("F7: Recalibration requested")
-        except Exception:
-            pass
         self._request_recalibration()
 
     def _request_recalibration(self) -> None:
@@ -380,19 +370,17 @@ class HotkeyManager(threading.Thread):
             return False
 
     # --------------------------- In-game macro handling ----------------------------
-    def _handle_macro_hotkey(self, task_callable: Callable[[object, object], None], label: str) -> None:
+    def _handle_macro_hotkey(self, task_callable: Callable[[object, object], None]) -> None:
         if not self._is_ark_active():
-            if self.overlay and hasattr(self.overlay, "show_toast"):
-                try:
-                    self.overlay.show_toast("Hotkey active only in Ark window")
-                except Exception:
-                    pass
+            # Silently ignore when Ark isn't the foreground window (no toast)
             return
         try:
             self.task_queue.put_nowait(task_callable)
-            if self.overlay and hasattr(self.overlay, "show_toast"):
+            # Immediate success flash; no 'queued' toast
+            if self.overlay and hasattr(self.overlay, "success_flash"):
                 try:
-                    self.overlay.show_toast(f"Queued: {label}")
+                    # Flash current status green and fade back; do not change text
+                    self.overlay.success_flash()
                 except Exception:
                     pass
         except Exception:
@@ -409,9 +397,9 @@ class HotkeyManager(threading.Thread):
         return _job
 
     def _task_medbrew_hot_toggle(self) -> Callable[[object, object], None]:
-        # Placeholder: reuse burst behavior as a toggle demonstration
+        # Separate handler to avoid identical implementation to burst
         def _job(_vision_controller, input_controller):
-            combat.execute_medbrew_burst(input_controller)
+            combat.execute_medbrew_hot_toggle(input_controller)
         return _job
 
     def _task_tek_punch(self) -> Callable[[object, object], None]:

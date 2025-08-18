@@ -29,3 +29,14 @@ class InputController:
         Types the given text.
         """
         pydirectinput.write(text)
+
+    def press_key(self, key: str, presses: int = 1, interval: float = 0.05):
+        """Press a key one or more times with an optional interval between presses.
+
+        Args:
+            key: The key to press (e.g., '0', 'e', 'f1').
+            presses: Number of times to press the key.
+            interval: Delay in seconds between presses.
+        """
+        # pydirectinput mirrors PyAutoGUI's API and supports press with repeats.
+        pydirectinput.press(key, presses=presses, interval=interval)

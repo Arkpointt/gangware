@@ -26,6 +26,7 @@ class StatusSignaller(QObject):
     toast = pyqtSignal(str, int)
     switch_to_calib = pyqtSignal()
     switch_to_main = pyqtSignal()
+    success = pyqtSignal(str, int)
 
 
 class OverlayWindow:
@@ -49,6 +50,7 @@ class OverlayWindow:
         # Thread-safe signaller and toast UI
         self._init_signaller()
         self._init_toast()
+        self._success_fade_timer = None
         # Ensure initial anchor after show/layout (scheduled on first show)
         # moved to show() to avoid QBasicTimer thread warnings before event loop
         # Optional Start button in calibration mode
@@ -147,6 +149,7 @@ class OverlayWindow:
         # Status label (dynamic)
         self.label = QLabel(status_text, self.window)
         self.label.setFont(QFont("Consolas", int(10 * self.scale)))
+        self.base_status_color = status_color
         self.label.setStyleSheet(f"color: {status_color};")
         self.label.setWordWrap(True)
         self.label.setGeometry(
@@ -162,6 +165,7 @@ class OverlayWindow:
         self.signaller.toast.connect(self._show_toast_ui)
         self.signaller.switch_to_calib.connect(self._switch_to_calibration_ui)
         self.signaller.switch_to_main.connect(self._switch_to_main_ui)
+        self.signaller.success.connect(self._success_flash_ui)
 
     def _init_toast(self) -> None:
         # Toast notification (hidden by default)
@@ -315,7 +319,8 @@ class OverlayWindow:
         """Switch the overlay visuals from calibration to main mode."""
         try:
             self.header_label.setText("<b>Gangware</b>")
-            self.label.setStyleSheet("color: #00eaff;")
+            self.base_status_color = "#00eaff"
+            self.label.setStyleSheet(f"color: {self.base_status_color};")
             self.set_status("Status: Online")
             # Hide start button if present
             if hasattr(self, "start_button") and self.start_button:
@@ -337,7 +342,8 @@ class OverlayWindow:
         """Switch the overlay visuals to calibration mode (not click-through)."""
         try:
             self.header_label.setText("<b>Gangware - Calibration</b>")
-            self.label.setStyleSheet("color: #ff7a7a;")
+            self.base_status_color = "#ff7a7a"
+            self.label.setStyleSheet(f"color: {self.base_status_color};")
             # Disable click-through so shortcuts/UI remain responsive/visible
             self._configure_window_flags(click_through=False)
             self.window.show()
@@ -499,3 +505,76 @@ class OverlayWindow:
             QTimer.singleShot(400, lambda: self.window.setStyleSheet(original))
         except Exception:
             pass
+
+    # -------------------- Success status flash --------------------
+    def success_flash(self, text: str | None = None, duration_ms: int = 1400):
+        """Public API: flash the status text green and fade back to base color.
+
+        Args:
+            text: Optional text to set during the flash; if None, keep current text.
+            duration_ms: Total fade duration back to the base color.
+        """
+        try:
+            self.signaller.success.emit(text or "", duration_ms)
+        except Exception:
+            pass
+
+    def _success_flash_ui(self, text: str, duration_ms: int):
+        try:
+            if text:
+                self.label.setText(text)
+            # Stop any ongoing fade
+            try:
+                if self._success_fade_timer is not None:
+                    self._success_fade_timer.stop()
+                    self._success_fade_timer.deleteLater()
+            except Exception:
+                pass
+            self._success_fade_timer = QTimer(self.window)
+
+            start_rgb = (0, 255, 170)  # neon green
+            end_rgb = self._hex_to_rgb(getattr(self, "base_status_color", "#00eaff"))
+            steps = max(8, min(40, int(duration_ms / 50)))
+            interval = max(16, int(duration_ms / steps))
+            idx = {"i": 0}
+
+            # Immediately set to green
+            self._set_label_color_rgb(*start_rgb)
+
+            def step():
+                i = idx["i"] + 1
+                t = i / steps
+                r = int(start_rgb[0] + (end_rgb[0] - start_rgb[0]) * t)
+                g = int(start_rgb[1] + (end_rgb[1] - start_rgb[1]) * t)
+                b = int(start_rgb[2] + (end_rgb[2] - start_rgb[2]) * t)
+                self._set_label_color_rgb(r, g, b)
+                idx["i"] = i
+                if i >= steps:
+                    try:
+                        self._success_fade_timer.stop()
+                        self._success_fade_timer.deleteLater()
+                    finally:
+                        self._success_fade_timer = None
+
+            self._success_fade_timer.timeout.connect(step)
+            self._success_fade_timer.start(interval)
+        except Exception:
+            # On failure, just set base color
+            try:
+                self.label.setStyleSheet(f"color: {getattr(self, 'base_status_color', '#00eaff')};")
+            except Exception:
+                pass
+
+    def _set_label_color_rgb(self, r: int, g: int, b: int):
+        self.label.setStyleSheet(f"color: {self._rgb_to_hex(r, g, b)};")
+
+    @staticmethod
+    def _hex_to_rgb(h: str) -> tuple[int, int, int]:
+        h = h.lstrip('#')
+        if len(h) == 3:
+            h = ''.join([c*2 for c in h])
+        return tuple(int(h[i:i+2], 16) for i in (0, 2, 4))
+
+    @staticmethod
+    def _rgb_to_hex(r: int, g: int, b: int) -> str:
+        return f"#{r:02x}{g:02x}{b:02x}"

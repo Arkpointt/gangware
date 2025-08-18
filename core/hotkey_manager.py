@@ -404,7 +404,8 @@ class HotkeyManager(threading.Thread):
 
     def _task_tek_punch(self) -> Callable[[object, object], None]:
         def _job(_vision_controller, input_controller):
-            combat.execute_tek_punch(input_controller)
+            # Pass config manager so macro can read tek_punch_cancel_key
+            combat.execute_tek_punch(input_controller, self.config_manager)
         return _job
 
     # --------------------------- Recalibration orchestration ----------------------------

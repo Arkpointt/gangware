@@ -20,9 +20,39 @@ class InputController:
 
     def click(self):
         """
-        Performs a mouse click.
+        Performs a left mouse click.
         """
-        pydirectinput.click()
+        pydirectinput.click(button='left')
+
+    def click_button(self, button: str, presses: int = 1, interval: float = 0.05):
+        """Click a specific mouse button one or more times.
+
+        Args:
+            button: 'left', 'right', or 'middle'. Other values (e.g., 'xbutton1')
+                    are attempted but may not be supported by pydirectinput.
+            presses: Number of clicks.
+            interval: Delay between clicks.
+        """
+        try:
+            pydirectinput.click(button=button, clicks=presses, interval=interval)
+        except Exception:
+            # Fallback: attempt default click if unsupported
+            for _ in range(max(1, presses)):
+                pydirectinput.click(button='left')
+                if interval > 0:
+                    try:
+                        import time as _t
+                        _t.sleep(interval)
+                    except Exception:
+                        pass
+
+    def mouse_down(self, button: str = 'left'):
+        """Press and hold a mouse button (left/right/middle)."""
+        pydirectinput.mouseDown(button=button)
+
+    def mouse_up(self, button: str = 'left'):
+        """Release a previously held mouse button (left/right/middle)."""
+        pydirectinput.mouseUp(button=button)
 
     def type_text(self, text):
         """

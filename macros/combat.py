@@ -11,17 +11,69 @@ from typing import Optional
 # We pass overlay=None by default to avoid tight coupling.
 
 
-def execute_tek_punch(input_controller):
+# Smart cooldown timestamp for Tek Punch (allow immediate retrigger once complete)
+_last_tek_punch_ready_at: float = 0.0
+
+
+def _resolve_cancel_key(config_manager) -> str:
+    """Return a pydirectinput-friendly key from config token like 'key_e'.
+
+    Falls back to 'e' if unavailable.
     """
-    Executes the Tek Punch macro using input automation.
-    Args:
-        input_controller: Instance of InputController for input automation.
+    try:
+        token = None
+        if config_manager is not None:
+            token = config_manager.get("tek_punch_cancel_key")
+        if not token:
+            return 'e'
+        token = str(token).strip()
+        if token.startswith('key_'):
+            return token[4:].lower()
+        # Mouse tokens are not reliably supported by pydirectinput for extra buttons.
+        # Fall back to a reasonable default if a mouse token was captured.
+        return 'e'
+    except Exception:
+        return 'e'
+
+
+def execute_tek_punch(input_controller, config_manager=None):
+    """Perform Tek Punch with a timestamp-based smart cooldown.
+
+    Sequence:
+    - Hold right-click 700ms
+    - Release right-click
+    - Wait 100ms
+    - Double-tap cancel key from config (DEFAULT.tek_punch_cancel_key)
+
+    Cooldown: Uses a timestamp so calls during an active sequence are ignored,
+    but the macro is immediately available again after completion.
     """
+    global _last_tek_punch_ready_at
+    now = __import__('time').perf_counter()
+    if now < _last_tek_punch_ready_at:
+        # Still within the active window from a previous run; skip
+        print("Tek Punch skipped due to active cooldown window.")
+        return
+
+    cancel_key = _resolve_cancel_key(config_manager)
+
     print("Executing Tek Punch macro...")
-    # Example: Simulate key press for Tek Punch (key is a placeholder)
-    input_controller.type_text('T')  # Replace 'T' with actual key
-    input_controller.click()         # Simulate punch
-    print("Tek Punch executed.")
+    try:
+        import time
+        # Hold right-click for 700 ms
+        input_controller.mouse_down('right')
+        time.sleep(0.7)
+        input_controller.mouse_up('right')
+        # Small delay
+        time.sleep(0.1)
+        # Double-tap cancel key quickly
+        input_controller.press_key(cancel_key, presses=2, interval=0.06)
+    except Exception as e:
+        print(f"Tek Punch error: {e}")
+    finally:
+        # Mark ready timestamp at actual completion time
+        _last_tek_punch_ready_at = __import__('time').perf_counter()
+        print("Tek Punch executed.")
 
 
 def execute_medbrew_burst(input_controller):

@@ -12,9 +12,9 @@ Features:
 - Calibration helper prompts (prompt_key_capture and switch_to_main)
 """
 
-from PyQt6.QtWidgets import QApplication, QWidget, QLabel, QShortcut
+from PyQt6.QtWidgets import QApplication, QWidget, QLabel, QPushButton
 from PyQt6.QtCore import Qt, QRect, QObject, pyqtSignal, QTimer
-from PyQt6.QtGui import QFont, QKeySequence
+from PyQt6.QtGui import QFont, QKeySequence, QShortcut
 
 
 class StatusSignaller(QObject):
@@ -22,6 +22,7 @@ class StatusSignaller(QObject):
     recalibrate = pyqtSignal()
     visibility = pyqtSignal(bool)
     toggle = pyqtSignal()
+    start = pyqtSignal()
 
 
 class OverlayWindow:
@@ -29,14 +30,17 @@ class OverlayWindow:
         # App and window
         self.app = QApplication([])
         self.window = QWidget()
-        self.window.setWindowFlags(
+        self.window.setWindowTitle("Gangware")
+        flags = (
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
             | Qt.WindowType.Tool
-            | Qt.WindowType.WindowTransparentForInput
         )
+        if not calibration_mode:
+            flags |= Qt.WindowType.WindowTransparentForInput
+        self.window.setWindowFlags(flags)
         self.window.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.window.setGeometry(self._get_top_right_geometry(360, 140))
+        self.window.setGeometry(self._get_top_right_geometry(380, 180))
         self.window.setStyleSheet(
             """
             background: qlineargradient(spread:pad, x1:0, y1:0, x2:1, y2:1, stop:0 rgba(8,18,28,200), stop:1 rgba(18,38,58,180));
@@ -48,25 +52,26 @@ class OverlayWindow:
 
         # Status layout: header + status line
         if calibration_mode:
-            header = "GANGWARE AI - CALIBRATION"
+            header = "Gangware - Calibration"
             status_text = message or "Calibration required: please complete initial setup."
             status_color = "#ff7a7a"
         else:
-            header = "GANGWARE AI"
+            header = "Gangware"
             status_text = "Status: Online"
             status_color = "#00eaff"
 
         # Header label (small, neon)
         self.header_label = QLabel(f"<b>{header}</b>", self.window)
-        self.header_label.setFont(QFont("Consolas", 12, QFont.Weight.Bold))
+        self.header_label.setFont(QFont("Consolas", 10, QFont.Weight.Bold))
         self.header_label.setStyleSheet("color: rgba(200,220,255,0.95);")
         self.header_label.setGeometry(QRect(18, 10, 320, 28))
 
         # Status label (dynamic)
         self.label = QLabel(status_text, self.window)
-        self.label.setFont(QFont("Consolas", 12))
+        self.label.setFont(QFont("Consolas", 10))
         self.label.setStyleSheet(f"color: {status_color};")
-        self.label.setGeometry(QRect(18, 40, 320, 88))
+        self.label.setWordWrap(True)
+        self.label.setGeometry(QRect(18, 40, 340, 100))
         self.label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
 
         # Signaller for thread-safe status and visibility updates
@@ -77,6 +82,25 @@ class OverlayWindow:
 
         # Ensure initial anchor after show/layout and react to screen changes
         QTimer.singleShot(0, self.reposition)
+
+        # Start button (calibration gate)
+        self.start_button = None
+        if calibration_mode:
+            self.start_button = QPushButton("Start", self.window)
+            self.start_button.setGeometry(QRect(260, 145, 100, 28))
+            self.start_button.setStyleSheet(
+                """
+                QPushButton {
+                    color: #0a0a0a;
+                    background-color: #00eaff;
+                    border: 1px solid rgba(0,234,255,0.9);
+                    border-radius: 6px;
+                }
+                QPushButton:hover { background-color: #33f0ff; }
+                QPushButton:pressed { background-color: #00c2d1; }
+                """
+            )
+            self.start_button.clicked.connect(lambda: self.signaller.start.emit())
 
         # React to monitor geometry/availability changes
         try:
@@ -148,12 +172,29 @@ class OverlayWindow:
         """Connect a slot/callable to the F7 recalibration signal."""
         self.signaller.recalibrate.connect(slot)
 
+    def on_start(self, slot):
+        """Connect a slot/callable to the calibration start signal."""
+        self.signaller.start.connect(slot)
+
     def switch_to_main(self):
         """Switch the overlay visuals from calibration to main mode."""
         try:
-            self.header_label.setText("<b>GANGWARE AI</b>")
+            self.header_label.setText("<b>Gangware</b>")
             self.label.setStyleSheet("color: #00eaff;")
             self.set_status("Status: Online")
+            # Hide start button if present
+            if hasattr(self, "start_button") and self.start_button:
+                self.start_button.hide()
+            # Enable click-through for main mode
+            flags = (
+                Qt.WindowType.FramelessWindowHint
+                | Qt.WindowType.WindowStaysOnTopHint
+                | Qt.WindowType.Tool
+                | Qt.WindowType.WindowTransparentForInput
+            )
+            self.window.setWindowFlags(flags)
+            self.window.show()  # ensure flags take effect
+            self.reposition()
         except Exception:
             # Do not let UI errors crash the application
             pass

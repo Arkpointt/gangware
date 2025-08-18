@@ -67,6 +67,7 @@ def main() -> None:
 
     # Connect F7 (overlay) to hotkey manager recalibration
     overlay.on_recalibrate(lambda: hotkey_manager.request_recalibration())
+    overlay.on_start(lambda: hotkey_manager.allow_calibration_start())
 
     # Optional UI demo task
     ui_demo = config_manager.get("ui_demo", fallback="False") == "True"

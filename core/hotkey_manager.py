@@ -65,6 +65,7 @@ class HotkeyManager(threading.Thread):
         self._recalibrate_event = threading.Event()
         self._f1_down = False  # debounce for F1 toggle
         self._f7_down = False  # debounce for F7 recalibration
+        self._calibration_gate = threading.Event()
 
     def run(self):
         """Main loop for hotkey management.
@@ -77,6 +78,20 @@ class HotkeyManager(threading.Thread):
         tek = self.config_manager.get("tek_punch_cancel_key")
         tmpl = self.config_manager.get("search_bar_template")
         if not inv or not tek or not tmpl:
+            self._log("Waiting for Start to begin calibration")
+            # Poll for F10 exit while waiting for Start
+            while not self._calibration_gate.is_set():
+                try:
+                    if user32 is not None and (user32.GetAsyncKeyState(0x79) & 0x8000):
+                        self._log("F10 pressed — exiting application")
+                        try:
+                            self.task_queue.put_nowait(None)
+                        except Exception:
+                            pass
+                        os._exit(0)
+                except Exception:
+                    pass
+                time.sleep(0.1)
             self._log("Starting calibration: capture keys and search bar template")
             success = self.calibrate()
             if success:
@@ -144,6 +159,18 @@ class HotkeyManager(threading.Thread):
 
             time.sleep(0.1)
 
+    def _maybe_exit_on_f10(self) -> None:
+        try:
+            if user32 is not None and (user32.GetAsyncKeyState(0x79) & 0x8000):
+                self._log("F10 pressed — exiting application")
+                try:
+                    self.task_queue.put_nowait(None)
+                except Exception:
+                    pass
+                os._exit(0)
+        except Exception:
+            pass
+
     def calibrate(self) -> bool:
         """Run interactive calibration capturing two keys and a template.
 
@@ -209,9 +236,11 @@ class HotkeyManager(threading.Thread):
             is_down_f8 = bool(user32.GetAsyncKeyState(0x77) & 0x8000)
             if is_down_f8:
                 break
+            self._maybe_exit_on_f10()
             time.sleep(0.02)
         # Debounce: wait for release
         while bool(user32.GetAsyncKeyState(0x77) & 0x8000):
+            self._maybe_exit_on_f10()
             time.sleep(0.02)
 
         try:
@@ -293,6 +322,7 @@ class HotkeyManager(threading.Thread):
                         # small debounce handled in helper; skip to outer loop
                         break
                     return result
+            self._maybe_exit_on_f10()
             time.sleep(0.02)
 
     def _process_pressed_vk(self, vk: int) -> Optional[str]:
@@ -304,6 +334,16 @@ class HotkeyManager(threading.Thread):
         - '__debounce__' when an invalid (left/right) mouse button was pressed
         """
         name = self._vk_name(vk)
+        # F10 exits application from any capture loop
+        if name == "F10":
+            try:
+                self._log("F10 pressed — exiting application")
+                try:
+                    self.task_queue.put_nowait(None)
+                except Exception:
+                    pass
+            finally:
+                os._exit(0)
         # Left/right clicks are explicitly rejected
         if name in ("left", "right"):
             if self.overlay:
@@ -339,6 +379,13 @@ class HotkeyManager(threading.Thread):
     def request_recalibration(self) -> None:
         """External trigger (e.g., GUI) to request recalibration on the hotkey thread."""
         self._recalibrate_event.set()
+
+    def allow_calibration_start(self) -> None:
+        """Allow the calibration to start by setting the gate event."""
+        try:
+            self._calibration_gate.set()
+        except Exception:
+            pass
 
     def _save_keys(self, inv_key: str, tek_key: str) -> None:
         """Persist captured calibration keys into the config manager (without completion)."""

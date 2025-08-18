@@ -5,3 +5,4 @@ pydirectinput
 PyQt6
 mss
 numpy
+pytest

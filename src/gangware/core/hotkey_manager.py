@@ -65,6 +65,9 @@ class HotkeyManager(threading.Thread):
       F2, F3, F4, Shift+Q, Shift+E, Shift+R
     """
 
+    HOTKEY_SHIFT_E = "Shift+E"
+    HOTKEY_SHIFT_R = "Shift+R"
+
     def __init__(self, config_manager, task_queue, state_manager, input_controller=None, overlay=None):
         super().__init__(daemon=True)
         self.config_manager = config_manager
@@ -85,6 +88,7 @@ class HotkeyManager(threading.Thread):
         # Common messages
         self._MSG_EXIT = "F10 pressed — exiting application"
         self._MSG_CAL_DONE = "Calibration complete"
+        self._MSG_MENU = "Main menu — overlay ready. Use F2/F3/F4 and Shift+Q/E/R in-game. F1 toggles overlay; F7 recalibrates."
         # Hotkey handler registry (id -> callable)
         self._hotkey_handlers: Dict[int, Callable[[], None]] = {}
         # Track whether global registration succeeded for F1 and F7 to suppress polling
@@ -110,6 +114,12 @@ class HotkeyManager(threading.Thread):
                     self.overlay.on_capture_tek(lambda: self._ui_capture_key("tek_punch_cancel_key", "Press your Tek Punch Cancel key (keyboard or mouse)", is_tek=True))
                 if hasattr(self.overlay, "on_capture_template"):
                     self.overlay.on_capture_template(self._ui_capture_template)
+                # Start button should open the calibration gate
+                if hasattr(self.overlay, "on_start"):
+                    self.overlay.on_start(self.allow_calibration_start)
+                # Overlay recalibration (F7 or button) should trigger the flow
+                if hasattr(self.overlay, "on_recalibrate"):
+                    self.overlay.on_recalibrate(self.request_recalibration)
         except Exception:
             pass
 
@@ -132,7 +142,7 @@ class HotkeyManager(threading.Thread):
         if inv and tek and tmpl:
             if self.overlay:
                 try:
-                    self.overlay.set_status(self._menu_text())
+                    self.overlay.set_status("Calibration complete. Application ready for use.")
                 except Exception:
                     pass
             return
@@ -278,46 +288,63 @@ class HotkeyManager(threading.Thread):
         VK_F7, VK_F10 = 0x76, 0x79
         VK_Q, VK_E, VK_R = 0x51, 0x45, 0x52
 
-        # Helper to register and log failures
-        def _reg(id_: int, mod: int, vk: int, name: str) -> bool:
-            try:
-                ok = bool(user32.RegisterHotKey(None, id_, mod, vk))
-                if not ok:
-                    try:
-                        err = kernel32.GetLastError() if kernel32 else 0
-                        self._log(f"Failed to register hotkey {name} (id={id_}, err={err})")
-                    except Exception:
-                        self._log(f"Failed to register hotkey {name} (id={id_})")
-                return ok
-            except Exception:
-                self._log(f"Exception while registering hotkey {name} (id={id_})")
-                return False
+        # Register global hotkeys via helper
+        self._has_reg_f7 = self._reg_hotkey(HK_F7, MOD_NONE, VK_F7, "F7")
+        self._reg_hotkey(HK_F10, MOD_NONE, VK_F10, "F10")
+        self._has_reg_f1 = self._reg_hotkey(HK_F1, MOD_NONE, VK_F1, "F1")
 
-        # Register global hotkeys
-        ok_f7 = _reg(HK_F7, MOD_NONE, VK_F7, "F7")
-        _reg(HK_F10, MOD_NONE, VK_F10, "F10")
-        ok_f1 = _reg(HK_F1, MOD_NONE, VK_F1, "F1")
-        self._has_reg_f7 = ok_f7
-        self._has_reg_f1 = ok_f1
-        # Register game-specific hotkeys
-        _reg(HK_F2, MOD_NONE, VK_F2, "F2")
-        _reg(HK_F3, MOD_NONE, VK_F3, "F3")
-        _reg(HK_F4, MOD_NONE, VK_F4, "F4")
-        _reg(HK_S_Q, MOD_SHIFT, VK_Q, "Shift+Q")
-        _reg(HK_S_E, MOD_SHIFT, VK_E, "Shift+E")
-        _reg(HK_S_R, MOD_SHIFT, VK_R, "Shift+R")
+        # Register game-specific hotkeys via data-driven loop
+        for id_, mod, vk, name in [
+            (HK_F2, MOD_NONE, VK_F2, "F2"),
+            (HK_F3, MOD_NONE, VK_F3, "F3"),
+            (HK_F4, MOD_NONE, VK_F4, "F4"),
+            (HK_S_Q, MOD_SHIFT, VK_Q, "Shift+Q"),
+            (HK_S_E, MOD_SHIFT, VK_E, self.HOTKEY_SHIFT_E),
+            (HK_S_R, MOD_SHIFT, VK_R, self.HOTKEY_SHIFT_R),
+        ]:
+            self._reg_hotkey(id_, mod, vk, name)
 
-        # Map IDs to handlers to reduce branching in the message loop
-        self._hotkey_handlers = {
-        HK_F1: self._on_hotkey_f1,
-        HK_F7: self._on_hotkey_f7,
-        HK_F10: self._maybe_exit_on_f10,
-        HK_F2: lambda: self._handle_macro_hotkey(self._task_equip_armor("flak"), "F2"),
-        HK_F3: lambda: self._handle_macro_hotkey(self._task_equip_armor("tek"), "F3"),
-        HK_F4: lambda: self._handle_macro_hotkey(self._task_equip_armor("mixed"), "F4"),
-        HK_S_Q: lambda: self._handle_macro_hotkey(self._task_medbrew_burst(), "Shift+Q"),
-        HK_S_E: self._on_hotkey_shift_e,
-        HK_S_R: self._on_hotkey_shift_r,
+        # Map IDs to handlers
+        self._hotkey_handlers = self._build_hotkey_handlers(
+            HK_F1, HK_F7, HK_F10, HK_F2, HK_F3, HK_F4, HK_S_Q, HK_S_E, HK_S_R
+        )
+
+    def _reg_hotkey(self, id_: int, mod: int, vk: int, name: str) -> bool:
+        try:
+            ok = bool(user32.RegisterHotKey(None, id_, mod, vk))
+            if not ok:
+                try:
+                    err = kernel32.GetLastError() if kernel32 else 0
+                    self._log(f"Failed to register hotkey {name} (id={id_}, err={err})")
+                except Exception:
+                    self._log(f"Failed to register hotkey {name} (id={id_})")
+            return ok
+        except Exception:
+            self._log(f"Exception while registering hotkey {name} (id={id_})")
+            return False
+
+    def _build_hotkey_handlers(
+        self,
+        hk_f1: int,
+        hk_f7: int,
+        hk_f10: int,
+        hk_f2: int,
+        hk_f3: int,
+        hk_f4: int,
+        hk_s_q: int,
+        hk_s_e: int,
+        hk_s_r: int,
+    ) -> Dict[int, Callable[[], None]]:
+        return {
+            hk_f1: self._on_hotkey_f1,
+            hk_f7: self._on_hotkey_f7,
+            hk_f10: self._maybe_exit_on_f10,
+            hk_f2: lambda: self._handle_macro_hotkey(self._task_equip_armor("flak"), "F2"),
+            hk_f3: lambda: self._handle_macro_hotkey(self._task_equip_armor("tek"), "F3"),
+            hk_f4: lambda: self._handle_macro_hotkey(self._task_equip_armor("mixed"), "F4"),
+            hk_s_q: lambda: self._handle_macro_hotkey(self._task_medbrew_burst(), "Shift+Q"),
+            hk_s_e: self._on_hotkey_shift_e,
+            hk_s_r: self._on_hotkey_shift_r,
         }
 
     def _on_hotkey_f1(self) -> None:
@@ -354,33 +381,36 @@ class HotkeyManager(threading.Thread):
         if user32 is None or kernel32 is None:
             return False
         try:
-            hwnd = user32.GetForegroundWindow()
-            if not hwnd:
-                return False
-            pid = ctypes.wintypes.DWORD()
-            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-            hproc = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid.value)
-            if not hproc:
-                return False
-            try:
-                buf_len = ctypes.wintypes.DWORD(260)
-                while True:
-                    buf = ctypes.create_unicode_buffer(buf_len.value)
-                    ok = kernel32.QueryFullProcessImageNameW(hproc, 0, buf, ctypes.byref(buf_len))
-                    if ok:
-                        exe = os.path.basename(buf.value or "").lower()
-                        return exe == "arkascended.exe"
-                    # If buffer was too small, Windows sets required size; retry
-                    needed = buf_len.value
-                    if needed <= len(buf):
-                        break
-                    buf_len = ctypes.wintypes.DWORD(needed)
-                return False
-            finally:
-                kernel32.CloseHandle(hproc)
+            exe = self._foreground_executable_name()
+            return exe == "arkascended.exe"
         except Exception:
             return False
+
+    def _foreground_executable_name(self) -> str:
+        """Return the lowercase executable name of the foreground process on Windows."""
+        hwnd = user32.GetForegroundWindow()
+        if not hwnd:
+            return ""
+        pid = ctypes.wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        hproc = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid.value)
+        if not hproc:
+            return ""
+        try:
+            buf_len = ctypes.wintypes.DWORD(260)
+            while True:
+                buf = ctypes.create_unicode_buffer(buf_len.value)
+                ok = kernel32.QueryFullProcessImageNameW(hproc, 0, buf, ctypes.byref(buf_len))
+                if ok:
+                    return os.path.basename(buf.value or "").lower()
+                needed = buf_len.value
+                if needed <= len(buf):
+                    break
+                buf_len = ctypes.wintypes.DWORD(needed)
+            return ""
+        finally:
+            kernel32.CloseHandle(hproc)
 
     # --------------------------- In-game macro handling ----------------------------
     def _handle_macro_hotkey(self, task_callable: Callable[[object, object], None], hotkey_label: Optional[str]) -> None:
@@ -423,46 +453,52 @@ class HotkeyManager(threading.Thread):
         # Mark line active in overlay
         try:
             if self.overlay and hasattr(self.overlay, "set_hotkey_line_active"):
-                self.overlay.set_hotkey_line_active("Shift+E")
+                self.overlay.set_hotkey_line_active(self.HOTKEY_SHIFT_E)
         except Exception:
             pass
-        def _run():
-            import time
-            total_duration = 22.5
-            interval = 1.5
-            presses = int(total_duration / interval) + 1
-            start = time.perf_counter()
-            i = 0
-            try:
-                while i < presses and not self._hot_stop_event.is_set():
-                    target = start + i * interval
-                    now = time.perf_counter()
-                    delay = target - now
-                    if delay > 0:
-                        # Wait in small slices to react to cancellation quickly
-                        end = now + delay
-                        while time.perf_counter() < end:
-                            if self._hot_stop_event.is_set():
-                                break
-                            time.sleep(min(0.05, end - time.perf_counter()))
-                    if self._hot_stop_event.is_set():
-                        break
-                    try:
-                        self.input_controller.press_key('0', presses=1)
-                    except Exception:
-                        pass
-                    i += 1
-            finally:
-                # Clear active line with nice fade
-                try:
-                    if self.overlay and hasattr(self.overlay, "clear_hotkey_line_active"):
-                        self.overlay.clear_hotkey_line_active("Shift+E", fade_duration_ms=2400)
-                except Exception:
-                    pass
-        t = threading.Thread(target=_run, daemon=True)
+        import time as _t
+        start_time = _t.perf_counter()
+        t = threading.Thread(target=self._hot_thread_loop, args=(start_time,), daemon=True)
         self._hot_thread = t
         try:
             t.start()
+        except Exception:
+            pass
+
+    def _hot_thread_loop(self, start: float) -> None:
+        import time as _t
+        total_duration = 22.5
+        interval = 1.5
+        presses = int(total_duration / interval) + 1
+        try:
+            for i in range(presses):
+                if self._hot_stop_event.is_set():
+                    break
+                target = start + i * interval
+                self._hot_wait_until(target)
+                if self._hot_stop_event.is_set():
+                    break
+                try:
+                    self.input_controller.press_key('0', presses=1)
+                except Exception:
+                    pass
+        finally:
+            self._hot_on_finish()
+
+    def _hot_wait_until(self, deadline: float) -> None:
+        import time as _t
+        while not self._hot_stop_event.is_set():
+            now = _t.perf_counter()
+            remain = deadline - now
+            if remain <= 0:
+                break
+            _t.sleep(min(0.05, remain))
+
+    def _hot_on_finish(self) -> None:
+        # Clear active line with nice fade
+        try:
+            if self.overlay and hasattr(self.overlay, "clear_hotkey_line_active"):
+                self.overlay.clear_hotkey_line_active(self.HOTKEY_SHIFT_E, fade_duration_ms=2400)
         except Exception:
             pass
 
@@ -470,44 +506,59 @@ class HotkeyManager(threading.Thread):
         """Tek Dash input window buffering: only buffer within last 200ms of current run."""
         if not self._is_ark_active():
             return
-        # Record last press timestamp for worker-side input-window evaluation
+
+        self._record_tek_dash_press_timestamp()
+        busy = self._get_tek_dash_busy_state()
+        pending = self._is_task_pending(lambda t: self._is_tek_punch_task(t))
+
+        if not busy and not pending:
+            self._start_new_tek_dash()
+
+    def _record_tek_dash_press_timestamp(self) -> None:
+        """Record the timestamp of the tek dash key press for input window evaluation."""
         try:
             import time as _t
             self.state_manager.set('tek_dash_last_press_at', _t.perf_counter())
         except Exception:
             pass
-        # Determine busy/pending state
+
+    def _get_tek_dash_busy_state(self) -> bool:
+        """Get the current busy state of tek dash, defaulting to False on error."""
         try:
-            busy = bool(self.state_manager.get('tek_dash_busy', False))
+            return bool(self.state_manager.get('tek_dash_busy', False))
         except Exception:
-            busy = False
-        pending = self._is_task_pending(lambda t: self._is_tek_punch_task(t))
-        if not busy and not pending:
-            # Start a new dash immediately
+            return False
+
+    def _start_new_tek_dash(self) -> None:
+        """Initialize state and queue a new tek dash task."""
+        self._initialize_tek_dash_state()
+        self._queue_tek_dash_task()
+
+    def _initialize_tek_dash_state(self) -> None:
+        """Set up the state manager for a new tek dash."""
+        try:
+            self.state_manager.set('tek_dash_busy', True)
+            self.state_manager.set('tek_dash_buffer', False)
+            self.state_manager.set('tek_dash_started_at', 0.0)
+            self.state_manager.set('tek_dash_est_duration', self._TEK_DASH_EST_DURATION)
+        except Exception:
+            pass
+
+    def _queue_tek_dash_task(self) -> None:
+        """Queue the tek punch task and flash the overlay if available."""
+        try:
+            self.task_queue.put_nowait(self._task_tek_punch())
+            self._flash_tek_dash_overlay()
+        except Exception:
+            pass
+
+    def _flash_tek_dash_overlay(self) -> None:
+        """Flash the hotkey line in the overlay for tek dash feedback."""
+        if self.overlay and hasattr(self.overlay, "flash_hotkey_line"):
             try:
-                self.state_manager.set('tek_dash_busy', True)
-                # Clear any stale buffer
-                self.state_manager.set('tek_dash_buffer', False)
-                # Reset started_at; worker will set when actually starting
-                self.state_manager.set('tek_dash_started_at', 0.0)
-                self.state_manager.set('tek_dash_est_duration', self._TEK_DASH_EST_DURATION)
+                self.overlay.flash_hotkey_line(self.HOTKEY_SHIFT_R)
             except Exception:
                 pass
-            try:
-                self.task_queue.put_nowait(self._task_tek_punch())
-                if self.overlay and hasattr(self.overlay, "flash_hotkey_line"):
-                    try:
-                        self.overlay.flash_hotkey_line("Shift+R")
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-            return
-        # If busy (currently running), do nothing extra; worker will evaluate input-window using last_press timestamp
-        if busy:
-            return
-        # Not busy but pending in queue (not started yet): do nothing; worker will start soon
-        return
 
     def _is_task_pending(self, predicate: Callable[[object], bool]) -> bool:
         """Check if any queued task matches predicate, thread-safely if possible."""
@@ -773,44 +824,69 @@ class HotkeyManager(threading.Thread):
     def _process_pressed_vk(self, vk: int) -> Optional[str]:
         """Map a pressed virtual-key into a token or control signal.
 
-        Returns:
+        Returns one of:
         - 'mouse_x...' or 'key_X' for a valid input
         - '__restart__' when Esc was pressed
-        - '__debounce__' when an invalid (left/right) mouse button was pressed
+        - '__debounce__' for ignored inputs
         """
         name = self._vk_name(vk)
-        # F10 exits application from any capture loop
-        if name == "F10":
-            try:
-                self._log(self._MSG_EXIT)
-                try:
-                    self.task_queue.put_nowait(None)
-                except Exception:
-                    pass
-            finally:
-                os._exit(0)
-        # Ignore control hotkeys during calibration capture to avoid accidental selection
-        if name in ("F1", "F7", "F8"):
+        if self._is_exit_key(name):
+            self._handle_exit()
+        if self._is_ignored_during_calibration(name):
             time.sleep(0.05)
             return "__debounce__"
-        # Left/right clicks are explicitly rejected
-        if name in ("left", "right"):
+        if self._is_disallowed_mouse(name):
+            self._notify_left_right_disallowed()
+            time.sleep(0.2)
+            return "__debounce__"
+        if name == "esc":
+            self._notify_cleared()
+            return "__restart__"
+        if self._is_mouse_vk(vk):
+            return f"mouse_{name}"
+        return f"key_{name}"
+
+    @staticmethod
+    def _is_exit_key(name: str) -> bool:
+        return name == "F10"
+
+    @staticmethod
+    def _is_ignored_during_calibration(name: str) -> bool:
+        return name in ("F1", "F7", "F8")
+
+    @staticmethod
+    def _is_disallowed_mouse(name: str) -> bool:
+        return name in ("left", "right")
+
+    @staticmethod
+    def _is_mouse_vk(vk: int) -> bool:
+        return vk in (1, 2, 4, 5, 6)
+
+    def _handle_exit(self) -> None:
+        try:
+            self._log(self._MSG_EXIT)
+            try:
+                self.task_queue.put_nowait(None)
+            except Exception:
+                pass
+        finally:
+            os._exit(0)
+
+    def _notify_left_right_disallowed(self) -> None:
+        try:
             if self.overlay:
                 self.overlay.set_status(
                     "Left/Right click not allowed — use another button or a keyboard key."
                 )
-            time.sleep(0.2)
-            return "__debounce__"
+        except Exception:
+            pass
 
-        # Esc acts as a restart/clear signal
-        if name == "esc":
+    def _notify_cleared(self) -> None:
+        try:
             if self.overlay:
                 self.overlay.set_status("Cleared current value — press a new key or button.")
-            return "__restart__"
-
-        if vk in (1, 2, 4, 5, 6):
-            return f"mouse_{name}"
-        return f"key_{name}"
+        except Exception:
+            pass
 
     def _prompt_until_valid(self, prompt: str) -> Optional[str]:
         """Prompt the user repeatedly until a non-restart value is captured.
@@ -897,18 +973,25 @@ class HotkeyManager(threading.Thread):
         tmpl = self.config_manager.get("search_bar_template")
         return bool(inv and tek and tmpl)
 
+    def _menu_text(self):
+        """
+        Return the main menu text.
+        """
+        return self._MSG_MENU
+
     def _complete_and_exit_calibration(self) -> None:
         try:
             self.config_manager.config["DEFAULT"]["calibration_complete"] = "True"
             self.config_manager.save()
         except Exception:
             pass
-        if self.overlay and hasattr(self.overlay, "switch_to_main"):
+        if self.overlay:
             try:
-                self.overlay.switch_to_main()
+                if hasattr(self.overlay, "switch_to_main"):
+                    self.overlay.switch_to_main()
                 self.overlay.set_status(self._menu_text())
-                if hasattr(self.overlay, "show_success"):
-                    self.overlay.show_success(self._MSG_CAL_DONE)
+                if hasattr(self.overlay, "success_flash"):
+                    self.overlay.success_flash(self._MSG_CAL_DONE)
             except Exception:
                 pass
 
@@ -992,26 +1075,3 @@ class HotkeyManager(threading.Thread):
                 self.overlay.set_status("Calibration menu — click buttons to capture Inventory, Tek Cancel, and Template (F8). Then click Start.")
         except Exception:
             pass
-
-    def _menu_text(self) -> str:
-        """Return the menu content listing categorized controls and hotkeys."""
-        return (
-            "Overlay Controls\n"
-            "\n"
-            "- F1: Hide/Unhide Overlay\n"
-            "- F10: Exit the Application\n"
-            "\n"
-            "Macro Hotkeys (Ark window only)\n"
-            "\n"
-            "- F2: Equip Flak Armor\n"
-            "- F3: Equip Tek Armor\n"
-            "- F4: Equip Mixed Armor\n"
-            "- Shift+Q: Medbrew Burst\n"
-            "- Shift+E: Medbrew Heal-over-Time (Toggle)\n"
-            "- Shift+R: Tek Punch\n"
-            "\n"
-            "Calibration Keys\n"
-            "\n"
-            "- F7: Start or restart Calibration Mode.\n"
-            "- F8: The \"capture\" key, used during setup.\n"
-        )

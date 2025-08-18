@@ -11,7 +11,6 @@ from .core.hotkey_manager import HotkeyManager
 from .core.worker import Worker
 from .controllers.vision import VisionController
 from .controllers.controls import InputController
-from .gui.overlay import OverlayWindow
 
 
 def main() -> None:
@@ -20,6 +19,10 @@ def main() -> None:
     Keeps the entry point minimal; configuration and state are loaded,
     threads are started, and an optional UI demo task can be queued.
     """
+
+    # Ensure a Qt application exists before any potential QWidget usage during imports
+    from PyQt6.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])
 
     config_manager = ConfigManager()
     state_manager = StateManager()
@@ -30,6 +33,9 @@ def main() -> None:
     )
     essential_keys = ["resolution", "log_level", "ui_theme"]
     missing_settings = [k for k in essential_keys if not config_manager.get(k)]
+
+    # Import overlay after QApplication is guaranteed to exist
+    from .gui.overlay import OverlayWindow
 
     if not calibration_complete or missing_settings:
         reason = []
@@ -83,8 +89,9 @@ def main() -> None:
 
         task_queue.put(demo_task)
 
-    # Show overlay (blocks until closed)
+    # Show overlay and start Qt event loop (blocks until closed)
     overlay.show()
+    app.exec()
 
 
 if __name__ == "__main__":

@@ -1,607 +1,479 @@
-"""
-Gangware Overlay (PyQt6)
+import sys
+from pathlib import Path
+from typing import Optional
 
-Clean, professional overlay UI:
-- Frameless, translucent, always-on-top, anchored top-right.
-- Navigation: Main and Calibration pages via QStackedWidget.
-- Main: Macro hotkeys in two columns with stylized key boxes and flash feedback.
-- Calibration: Set Inventory Key, Set Tek Cancel Key, Capture Template, Start button, Back to Main.
-
-Public API (used by other components):
-- set_status(text), set_visible(bool), toggle_visibility()
-- switch_to_main(), switch_to_calibration()
-- on_recalibrate(slot), on_start(slot)
-- on_capture_inventory(slot), on_capture_tek(slot), on_capture_template(slot)
-- set_captured_inventory(token), set_captured_tek(token), set_template_status(ok, path)
-- success_flash(text=None, duration_ms=1200)
-- flash_hotkey_line(hotkey, duration_ms=2000)
-- set_hotkey_line_active(hotkey), clear_hotkey_line_active(hotkey, fade_duration_ms=2000)
-"""
-
-from __future__ import annotations
-
-import os
-from typing import Callable, Dict, Optional
-
-from PyQt6.QtCore import QObject, QRect, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QFont, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
-    QApplication,
-    QFrame,
-    QGridLayout,
-    QHBoxLayout,
-    QLabel,
-    QPushButton,
-    QStackedWidget,
-    QScrollArea,
-    QVBoxLayout,
-    QWidget,
+    QApplication, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
+    QLabel, QMainWindow, QPushButton, QStackedWidget,
+    QGraphicsDropShadowEffect, QFrame, QScrollArea
 )
+from PyQt6.QtGui import QColor, QGuiApplication
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject
+from .design_tokens import STATUS_OK
+
+# Global UI scale (~34% reduction)
+UI_SCALE = 0.66
 
 
-class _Signals(QObject):
-    status = pyqtSignal(str)
-    visibility = pyqtSignal(bool)
-    toggle = pyqtSignal()
-    switch_to_main = pyqtSignal()
-    switch_to_calib = pyqtSignal()
-    start = pyqtSignal()
+def spx(n: int) -> int:
+    """Scale integer pixel values by UI_SCALE."""
+    try:
+        return int(round(n * UI_SCALE))
+    except Exception:
+        return int(n)
+
+
+# ---------- Neon helpers ----------
+
+def glow(widget, color="#00DDFF", radius=28, opacity=150):
+    eff = QGraphicsDropShadowEffect(widget)
+    c = QColor(color)
+    c.setAlpha(opacity)
+    eff.setBlurRadius(radius)
+    eff.setColor(c)
+    eff.setOffset(0, 0)
+    widget.setGraphicsEffect(eff)
+
+
+class Keycap(QWidget):
+    """Rounded cyan 'key' cap like Shift+R, F2, etc."""
+
+    def __init__(self, text: str, minw: int = 120, parent=None):
+        super().__init__(parent)
+        self.setMinimumWidth(spx(minw))
+        self.setFixedHeight(spx(28))
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        btn = QPushButton(text)
+        btn.setEnabled(False)
+        btn.setCursor(Qt.CursorShape.ArrowCursor)
+        btn.setObjectName("keycap")
+        btn.setMinimumWidth(spx(minw))
+        lay.addWidget(btn)
+        glow(btn, "#00DDFF", 26, 120)
+
+
+class OverlaySignals(QObject):
     recalibrate = pyqtSignal()
+    start = pyqtSignal()
     capture_inventory = pyqtSignal()
     capture_tek = pyqtSignal()
     capture_template = pyqtSignal()
-    inv_value = pyqtSignal(str)
-    tek_value = pyqtSignal(str)
-    tmpl_status = pyqtSignal(bool, str)
-    success = pyqtSignal(str, int)
-    flash_line = pyqtSignal(str, int)
-    hold_line = pyqtSignal(str)
-    clear_line = pyqtSignal(str, int)
 
 
-class OverlayWindow:
-    CYAN = "#00D8FF"
+class OverlayWindow(QMainWindow):
+    CYAN = "#00DDFF"
     ORANGE = "#FFB800"
-    GRAY = "#E0E0E0"
-    MAX_WIDTH = 520
     NONE_DISPLAY = "[ None ]"
 
-    def __init__(self, calibration_mode: bool = False, message: Optional[str] = None) -> None:
-        self.calibration_mode = bool(calibration_mode)
-        self.initial_message = message or ""
+    def __init__(self, calibration_mode: bool = False, message: Optional[str] = None):
+        super().__init__()
 
-        self.app = QApplication.instance() or QApplication([])
-        self.window = QWidget()
-        self.window.setMaximumWidth(self.MAX_WIDTH)
-        self.window.setObjectName("gw-root")
-        self.window.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self._set_flags(click_through=not self.calibration_mode)
-
-        # Root styled frame
-        self.root = QVBoxLayout(self.window)
-        self.root.setContentsMargins(14, 12, 14, 12)
-        self.root.setSpacing(10)
-
-        self.chrome = QFrame(self.window)
-        self.chrome.setObjectName("gw-chrome")
-        self.chrome.setStyleSheet(
-            f"""
-            #gw-chrome {{
-                background-color: rgba(20,20,24,210);
-                border: 1px solid {self.CYAN};
-                border-radius: 12px;
-            }}
-            QWidget {{ font-family: Consolas; color: {self.GRAY}; }}
-            QPushButton {{
-                background-color: rgba(0,216,255,0.18);
-                border: 1px solid {self.CYAN};
-                border-radius: 6px;
-                padding: 6px 10px;
-                color: {self.GRAY};
-            }}
-            QPushButton:hover {{ background-color: rgba(0,216,255,0.32); }}
-            QPushButton:pressed {{ background-color: rgba(0,216,255,0.22); }}
-            QLabel.keybox {{
-                border: 1px solid rgba(0,216,255,0.45);
-                border-radius: 4px; padding: 3px 8px; color: {self.GRAY};
-            }}
-            QLabel.title {{ color: {self.CYAN}; font-weight: 700; }}
-            QLabel.section {{ color: {self.ORANGE}; font-weight: 700; }}
-            """
-        )
-        self.root.addWidget(self.chrome)
-
-        self.vbox = QVBoxLayout(self.chrome)
-        self.vbox.setContentsMargins(12, 10, 12, 10)
-        self.vbox.setSpacing(8)
-
-        # Header
-        self.header = QLabel("GANGWARE", self.chrome)
-        self.header.setProperty("class", "title")
-        self.header.setFont(QFont("Consolas", 14, QFont.Weight.Bold))
-        self.vbox.addWidget(self.header)
-
-        # Navigation
-        nav = QHBoxLayout()
-        self.btn_main = QPushButton("Main", self.chrome)
-        self.btn_calib = QPushButton("Calibration", self.chrome)
-        for b in (self.btn_main, self.btn_calib):
-            b.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_main.clicked.connect(lambda: self._show_page(0))
-        self.btn_calib.clicked.connect(lambda: self._show_page(1))
-        nav.addWidget(self.btn_main)
-        nav.addWidget(self.btn_calib)
-        self.vbox.addLayout(nav)
-
-        # Stack
-        self.stack = QStackedWidget(self.chrome)
-        self.vbox.addWidget(self.stack, 1)
-
-        # Footer status line
-        self.status = QLabel(self.initial_message or "Status: Online", self.chrome)
-        self.status.setWordWrap(True)
-        self.vbox.addWidget(self.status)
-
-        # Pages
-        self._hotkey_labels: Dict[str, QLabel] = {}
-        self.page_main = self._build_main()
-        self.page_calib = self._build_calibration()
-        self.stack.addWidget(self.page_main)
-        self.stack.addWidget(self.page_calib)
-
-        # Signals (queued)
-        self.signals = _Signals()
-        q = Qt.ConnectionType.QueuedConnection
-        self.signals.status.connect(self._set_status_ui, q)
-        self.signals.visibility.connect(self._set_visible_ui, q)
-        self.signals.toggle.connect(self._toggle_visible_ui, q)
-        self.signals.switch_to_main.connect(lambda: self._show_page(0), q)
-        self.signals.switch_to_calib.connect(lambda: self._show_page(1), q)
-        self.signals.inv_value.connect(self._set_captured_inventory_ui, q)
-        self.signals.tek_value.connect(self._set_captured_tek_ui, q)
-        self.signals.tmpl_status.connect(self._set_template_status_ui, q)
-        self.signals.success.connect(self._success_flash_ui, q)
-        self.signals.flash_line.connect(self._flash_line_ui, q)
-        self.signals.hold_line.connect(self._hold_line_ui, q)
-        self.signals.clear_line.connect(self._clear_line_ui, q)
-
-        # Shortcuts
-        sc_toggle = QShortcut(QKeySequence("F1"), self.window)
-        sc_toggle.setContext(Qt.ShortcutContext.ApplicationShortcut)
-        sc_toggle.activated.connect(lambda: self.signals.toggle.emit())
-        sc_recal = QShortcut(QKeySequence("F7"), self.window)
-        sc_recal.setContext(Qt.ShortcutContext.ApplicationShortcut)
-        sc_recal.activated.connect(lambda: self.signals.recalibrate.emit())
-        sc_exit = QShortcut(QKeySequence("F10"), self.window)
-        sc_exit.setContext(Qt.ShortcutContext.ApplicationShortcut)
-        sc_exit.activated.connect(lambda: os._exit(0))
-
-        # Geometry and start page
-        self._anchor_top_right(self.MAX_WIDTH, 360)
-        self._show_page(1 if self.calibration_mode else 0)
-        self.window.setWindowTitle("Gangware")
-        self.window.setWindowOpacity(0.98)
-        self.window.show()
-
-        # Internal timers
-        self._status_flash_timer: Optional[QTimer] = None
-        self._value_flash_timers: Dict[QLabel, QTimer] = {}
-
-        QTimer.singleShot(0, lambda: self._anchor_top_right(self.MAX_WIDTH, 360))
-
-    # ---- Window flags / placement ----
-    def _set_flags(self, click_through: bool) -> None:
-        flags = (
+        # Window flags and transparency
+        self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
             | Qt.WindowType.Tool
         )
-        if click_through:
-            flags |= Qt.WindowType.WindowTransparentForInput
-        self.window.setWindowFlags(flags)
+        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
 
-    def _anchor_top_right(self, width: int, height: int) -> None:
-        screen = self.app.primaryScreen()
-        rect = screen.availableGeometry()
-        x = rect.x() + rect.width() - width - 20
-        y = rect.y() + 20
-        self.window.setGeometry(QRect(x, y, width, height))
+        # Signals
+        self.signals = OverlaySignals(self)
 
-    # ---- Build pages ----
-    def _build_main(self) -> QWidget:
-        page = QWidget(self.chrome)
-        grid = QGridLayout(page)
-        grid.setContentsMargins(6, 6, 6, 6)
-        grid.setHorizontalSpacing(18)
-        grid.setVerticalSpacing(10)
+        # Calibration state containers
+        self._cal_boxes = {}
+        self._start_emitted = False  # auto-start gate
 
-        title = QLabel("Macro Hotkeys (Ark window only)", page)
-        title.setProperty("class", "section")
-        title.setFont(QFont("Consolas", 11, QFont.Weight.Bold))
-        title.setWordWrap(True)
-        grid.addWidget(title, 0, 0, 1, 4)
+        # Root card container
+        card = QWidget()
+        card.setObjectName("card")
+        self.setCentralWidget(card)
 
-        entries = [
-            ("Equip Flak Armor", "F2"),
-            ("Equip Tek Armor", "F3"),
-            ("Equip Mixed Armor", "F4"),
-            ("Medbrew Burst", "Shift+Q"),
-            ("Medbrew Heal-over-Time (Toggle)", "Shift+E"),
-            ("Tek Punch", "Shift+R"),
-        ]
+        root = QVBoxLayout(card)
+        root.setContentsMargins(spx(12), spx(12), spx(12), spx(12))
+        root.setSpacing(spx(12))
 
-        def add_row(r: int, desc: str, key: str, c: int) -> None:
-            d = QLabel(desc, page)
-            d.setFont(QFont("Consolas", 10))
-            d.setWordWrap(True)
-            k = QLabel(key, page)
-            k.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            k.setProperty("class", "keybox")
-            k.setMinimumWidth(72)
-            self._hotkey_labels[key] = k
-            grid.addWidget(d, r, c)
-            grid.addWidget(k, r, c + 1)
+        # Header title
+        title = QLabel("GANGWARE")
+        title.setObjectName("title")
+        glow(title, self.CYAN, 22, 140)
+        root.addWidget(title)
+        root.addWidget(self._divider())
 
-        row = 1
-        for i, (desc, key) in enumerate(entries):
-            col = 0 if i % 2 == 0 else 2
-            if i % 2 == 0 and i > 0:
-                row += 1
-            add_row(row, desc, key, col)
+        # Tabs
+        tabs_row = QWidget()
+        tabs = QHBoxLayout(tabs_row)
+        tabs.setContentsMargins(0, 0, 0, 0)
+        tabs.setSpacing(spx(8))
+        self.btn_main_tab = self._nav_button("MAIN", True)
+        self.btn_cal_tab = self._nav_button("CALIBRATION", False)
+        tabs.addWidget(self.btn_main_tab)
+        tabs.addWidget(self.btn_cal_tab)
+        tabs.addStretch(1)
+        root.addWidget(tabs_row)
 
-        return page
+        # Pages
+        self.stack = QStackedWidget()
+        self.page_main = self._page_main()
+        self.page_cal = self._page_calibration()
+        self.stack.addWidget(self.page_main)
+        self.stack.addWidget(self.page_cal)
+        root.addWidget(self.stack)
 
-    def _build_calibration(self) -> QWidget:
-        page = QWidget(self.chrome)
-        # Ensure calibration page inherits chrome background (transparent) and not white
+        # Footer
+        root.addWidget(self._divider())
+        self.status_label = QLabel(message or "")
+        self.status_label.setObjectName("status")
+        root.addWidget(self.status_label)
+
+        # Wire tab switching
+        self.btn_main_tab.clicked.connect(lambda: self._switch_tab(0))
+        self.btn_cal_tab.clicked.connect(lambda: self._switch_tab(1))
+
+        # Default page
+        self._switch_tab(1 if calibration_mode else 0)
+
+        # Styles
+        self._styles()
+
+        # Size and initial position (scaled)
+        self.resize(spx(500), spx(520))
+
+        # Re-anchor if the window's screen changes (multi-monitor support)
         try:
-            page.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+            wh = self.windowHandle()
+            if wh is not None:
+                wh.screenChanged.connect(lambda _s: QTimer.singleShot(0, self._anchor_top_right))
         except Exception:
             pass
-        page.setStyleSheet("background: transparent;")
-        v = QVBoxLayout(page)
-        v.setContentsMargins(6, 6, 6, 6)
-        v.setSpacing(10)
 
-        # Rich descriptions
-        desc = QLabel(page)
-        desc.setWordWrap(True)
-        desc.setText(
-            "<b>Calibration</b><br><br>"
-            "<b>Inventory Key Button</b><br>"
-            "<i>Function</i>: One-time setup key.<br>"
-            "<i>Description</i>: When prompted by the GUI, press the key or mouse button you personally use to open your inventory (e.g., 'I' or 'Mouse4'). The application saves this so the AI knows how to open your inventory during macros." \
-            "<br><br>"
-            "<b>Tek Dash Button</b><br>"
-            "<i>Function</i>: In-game macro hotkey (Shift+R).<br>"
-            "<i>Description</i>: When you press Shift+R, it triggers the AI to execute the Tek Dash (Tek Boost) macro: a rapid, animation-canceling punch sequence for high-speed movement. The <b>Tek Cancel</b> key you set here is used inside this macro to cleanly cancel the punch animation." \
-            "<br><br>"
-            "<b>Inventory Image Button</b><br>"
-            "<i>Function</i>: One-time setup capture.<br>"
-            "<i>Description</i>: When prompted, hover your mouse over the inventory search bar and press F8. This captures a small screenshot to create a visual template that computer vision uses to locate where to click and type in your UI." \
-            "<br><br>"
-            "Complete all three, then click <b>Start</b> to return to the main overlay."
-        )
-        v.addWidget(desc)
+    # ------ UI builders ------
+    def _switch_tab(self, idx: int):
+        self.stack.setCurrentIndex(idx)
+        self.btn_main_tab.setChecked(idx == 0)
+        self.btn_cal_tab.setChecked(idx == 1)
 
-        # Rows
-        k_title = QLabel("Keybinds", page)
-        k_title.setProperty("class", "section")
-        k_title.setFont(QFont("Consolas", 11, QFont.Weight.Bold))
-        v.addWidget(k_title)
+    def _page_main(self):
+        page = QWidget()
+        outer = QVBoxLayout(page)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(spx(14))
 
-        self.inv_row = self._task_row(page, "Set Inventory Key", "[SET]", lambda: self.signals.capture_inventory.emit())
-        v.addLayout(self.inv_row)
-        self.tek_row = self._task_row(page, "Set Tek Cancel Key", "[SET]", lambda: self.signals.capture_tek.emit())
-        v.addLayout(self.tek_row)
+        grid = QGridLayout()
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(spx(14))
+        grid.setVerticalSpacing(spx(14))
 
-        t_title = QLabel("Visual Templates", page)
-        t_title.setProperty("class", "section")
-        t_title.setFont(QFont("Consolas", 11, QFont.Weight.Bold))
-        v.addWidget(t_title)
+        # Left column: COMBAT
+        combat = self._section("COMBAT", [
+            ("Tek Dash", "Shift+R"),
+            ("Medbrew", "Shift+Q"),
+            ("Med HoT", "Shift+E"),
+        ])
 
-        self.tmpl_row = self._task_row(
-            page,
-            "Capture Inventory Template (hover search bar, press F8)",
-            "Capture",
-            lambda: self.signals.capture_template.emit(),
-        )
-        v.addLayout(self.tmpl_row)
+        # Right column: ARMOR
+        armor = self._section("ARMOR", [
+            ("Flak", "F2"),
+            ("Tek", "F3"),
+            ("Mixed", "F4"),
+        ])
 
-        # Action buttons
-        hb = QHBoxLayout()
-        self.btn_back = QPushButton("Back to Main", page)
-        self.btn_back.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_back.clicked.connect(lambda: self.signals.switch_to_main.emit())
-        hb.addWidget(self.btn_back)
-        hb.addStretch(1)
-        self.btn_start = QPushButton("Start", page)
-        self.btn_start.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_start.setEnabled(False)
-        self.btn_start.clicked.connect(lambda: self.signals.start.emit())
-        hb.addWidget(self.btn_start)
-        v.addLayout(hb)
+        grid.addWidget(combat, 0, 0)
+        grid.addWidget(armor, 0, 1)
 
-        scroll = QScrollArea(self.chrome)
+        # Core (full width)
+        core = self._section("CORE", [
+            ("Toggle UI", "F1"),
+            ("Exit App",  "F10"),
+        ])
+        outer.addLayout(grid)
+        outer.addWidget(core)
+        return page
+
+    def _page_calibration(self):
+        """
+        Keeps your simple page structure, but implements the
+        HTML-like rows: [ SET ] / [ CAPTURE ] + a status box.
+        """
+        # Inner page with content
+        inner = QWidget()
+        lay = QVBoxLayout(inner)
+        lay.setSpacing(spx(12))
+        lay.setContentsMargins(0, 0, 0, 0)
+
+        # KEYBIND SETUP section
+        kb = QFrame()
+        kb.setObjectName("section")
+        glow(kb, self.CYAN, 22, 70)
+        vb = QVBoxLayout(kb)
+        vb.setContentsMargins(spx(12), spx(10), spx(12), spx(10))
+        vb.setSpacing(spx(10))
+
+        t1 = QLabel("KEYBIND SETUP")
+        t1.setObjectName("sectionTitle")
+        glow(t1, self.ORANGE, 18, 120)
+        vb.addWidget(t1)
+
+        vb.addWidget(self._cal_row("inventory", "Set Inventory Key", "[ SET ]",
+                                   lambda: self.signals.capture_inventory.emit()))
+        vb.addWidget(self._cal_row("tek_cancel", "Set Tek Dash Cancel Key", "[ SET ]",
+                                   lambda: self.signals.capture_tek.emit()))
+        lay.addWidget(kb)
+
+        # VISUAL SETUP section
+        vs = QFrame()
+        vs.setObjectName("section")
+        glow(vs, self.CYAN, 22, 70)
+        v2 = QVBoxLayout(vs)
+        v2.setContentsMargins(spx(12), spx(10), spx(12), spx(10))
+        v2.setSpacing(spx(10))
+
+        t2 = QLabel("VISUAL SETUP")
+        t2.setObjectName("sectionTitle")
+        glow(t2, self.ORANGE, 18, 120)
+        v2.addWidget(t2)
+
+        v2.addWidget(self._cal_row("template", "Capture Search Bar (F8)", "[ CAPTURE ]",
+                                   lambda: self.signals.capture_template.emit()))
+        lay.addWidget(vs)
+
+        # Footer divider only (no Start button)
+        footer = QWidget()
+        fl = QVBoxLayout(footer)
+        fl.setContentsMargins(0, spx(8), 0, 0)
+        fl.addWidget(self._divider())
+        lay.addWidget(footer)
+
+        # Make whole calibration page scrollable (safety)
+        scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        # Make scroll area and viewport transparent to show chrome background
-        scroll.setStyleSheet("QScrollArea { background: transparent; }")
-        try:
-            scroll.viewport().setStyleSheet("background: transparent;")
-        except Exception:
-            pass
-        scroll.setWidget(page)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setWidget(inner)
         return scroll
 
-    def _task_row(self, parent: QWidget, text: str, btn_text: str, on_click: Callable[[], None]) -> QHBoxLayout:
-        row = QHBoxLayout()
-        row.setSpacing(8)
-        lbl = QLabel(text, parent)
-        lbl.setFont(QFont("Consolas", 10))
-        lbl.setWordWrap(True)
-        btn = QPushButton(btn_text, parent)
+    # ------ Building blocks ------
+    def _section(self, title: str, items: list[tuple[str, str]]):
+        frame = QFrame()
+        frame.setObjectName("section")
+        glow(frame, self.CYAN, 22, 70)
+
+        v = QVBoxLayout(frame)
+        v.setContentsMargins(spx(12), spx(10), spx(12), spx(10))
+        v.setSpacing(spx(10))
+
+        t = QLabel(title)
+        t.setObjectName("sectionTitle")
+        glow(t, self.ORANGE, 18, 130)
+        v.addWidget(t)
+
+        for name, key in items:
+            row = QWidget()
+            h = QHBoxLayout(row)
+            h.setContentsMargins(0, 0, 0, 0)
+            name_lbl = QLabel(name)
+            name_lbl.setObjectName("item")
+            h.addWidget(name_lbl)
+            h.addStretch(1)
+            h.addWidget(Keycap(key))
+            v.addWidget(row)
+
+        return frame
+
+    def _cal_row(self, key: str, label: str, btn_text: str, on_click):
+        row = QWidget()
+        h = QHBoxLayout(row)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(spx(8))
+
+        name_lbl = QLabel(label)
+        name_lbl.setObjectName("item")
+
+        btn = QPushButton(btn_text)
+        btn.setObjectName("smallBtn")
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
         btn.clicked.connect(on_click)
-        box = QLabel(self.NONE_DISPLAY, parent)
+        glow(btn, self.CYAN, 20, 100)
+
+        box = QLabel(self.NONE_DISPLAY)
+        box.setObjectName("statusBox")
         box.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        box.setProperty("class", "keybox")
-        box.setMinimumWidth(120)
-        row.addWidget(lbl, 1)
-        row.addWidget(btn, 0)
-        row.addWidget(box, 0)
-        row._gw_display_box = box  # type: ignore[attr-defined]
-        row._gw_button = btn       # type: ignore[attr-defined]
+        box.setMinimumWidth(spx(120))
+        box.setFixedHeight(spx(36))
+        box.setProperty("state", "pending")
+        box.style().unpolish(box); box.style().polish(box)
+
+        self._cal_boxes[key] = box
+
+        h.addWidget(name_lbl)
+        h.addStretch(1)
+        h.addWidget(btn)
+        h.addSpacing(spx(8))
+        h.addWidget(box)
         return row
 
-    # ---- Public API ----
-    def set_status(self, text: str) -> None:
-        self.signals.status.emit(text)
+    def _nav_button(self, text: str, active: bool):
+        btn = QPushButton(text)
+        btn.setCheckable(True)
+        btn.setChecked(active)
+        btn.setObjectName("tab")
+        glow(btn, self.CYAN, 24, 90)
+        return btn
 
-    def prompt_key_capture(self, prompt: str) -> None:
-        # Display a prompt in the status line during key capture
+    def _divider(self):
+        line = QFrame()
+        line.setFrameShape(QFrame.Shape.HLine)
+        line.setFixedHeight(2)
+        line.setObjectName("divider")
+        return line
+
+    # ------ StyleSheet ------
+    def _styles(self):
         try:
-            self.signals.status.emit(str(prompt))
-        except Exception:
-            pass
+            # Build and apply generated QSS from tokens
+            from . import build_theme as theme_builder
+            out_path = theme_builder.build()
+            qss = Path(out_path).read_text(encoding="utf-8")
+            self.setStyleSheet(qss)
+        except Exception as e:
+            # Fallback: leave default styles if build fails
+            print(f"Failed to apply themed stylesheet: {e}")
 
-    def toggle_visibility(self) -> None:
-        self.signals.toggle.emit()
-
-    def set_visible(self, visible: bool) -> None:
-        self.signals.visibility.emit(bool(visible))
-
-    def switch_to_main(self) -> None:
-        self.signals.switch_to_main.emit()
-
-    def switch_to_calibration(self) -> None:
-        self.signals.switch_to_calib.emit()
-
-    def on_recalibrate(self, slot: Callable[[], None]):
+    # ------ Public API (signals wiring expected by main/hotkey manager) ------
+    def on_recalibrate(self, slot):
         self.signals.recalibrate.connect(slot)
 
-    def on_start(self, slot: Callable[[], None]):
+    def on_start(self, slot):
         self.signals.start.connect(slot)
 
-    def on_capture_inventory(self, slot: Callable[[], None]):
+    def on_capture_inventory(self, slot):
         self.signals.capture_inventory.connect(slot)
 
-    def on_capture_tek(self, slot: Callable[[], None]):
+    def on_capture_tek(self, slot):
         self.signals.capture_tek.connect(slot)
 
-    def on_capture_template(self, slot: Callable[[], None]):
+    def on_capture_template(self, slot):
         self.signals.capture_template.connect(slot)
 
+    # For external callers to push results back into the UI
     def set_captured_inventory(self, token: str) -> None:
-        self.signals.inv_value.emit(token)
+        box = self._cal_boxes.get("inventory")
+        if box:
+            box.setText(f"[ {self._friendly_token(token)} ]")
+            box.setProperty("state", "done")
+            box.style().unpolish(box); box.style().polish(box)
+        self._update_start_enabled()
 
     def set_captured_tek(self, token: str) -> None:
-        self.signals.tek_value.emit(token)
+        box = self._cal_boxes.get("tek_cancel")
+        if box:
+            box.setText(f"[ {self._friendly_token(token)} ]")
+            box.setProperty("state", "done")
+            box.style().unpolish(box); box.style().polish(box)
+        self._update_start_enabled()
 
     def set_template_status(self, ok: bool, path: Optional[str] = None) -> None:
-        self.signals.tmpl_status.emit(bool(ok), path or "")
-
-    def show(self) -> None:
-        self.app.exec()
-
-    def success_flash(self, text: Optional[str] = None, duration_ms: int = 1200) -> None:
-        self.signals.success.emit(text or "", int(duration_ms))
-
-    def flash_hotkey_line(self, hotkey: str, duration_ms: int = 2000) -> None:
-        self.signals.flash_line.emit(hotkey, int(duration_ms))
-
-    def set_hotkey_line_active(self, hotkey: str) -> None:
-        self.signals.hold_line.emit(hotkey)
-
-    def clear_hotkey_line_active(self, hotkey: str, fade_duration_ms: int = 2000) -> None:
-        self.signals.clear_line.emit(hotkey, int(fade_duration_ms))
-
-    # ---- UI slots ----
-    def _set_status_ui(self, text: str) -> None:
-        self.status.setText(text)
-
-    def _set_visible_ui(self, visible: bool) -> None:
-        if visible:
-            self.window.show()
-        else:
-            self.window.hide()
-
-    def _toggle_visible_ui(self) -> None:
-        self._set_visible_ui(not self.window.isVisible())
-
-    def _show_page(self, index: int) -> None:
-        index = 0 if index <= 0 else 1
-        self.stack.setCurrentIndex(index)
-        self._set_flags(click_through=(index == 0))
-        self.window.show()  # apply flags
-        # Bold the active nav button
-        if index == 0:
-            self.btn_main.setStyleSheet(self.btn_main.styleSheet() + "\nfont-weight: 700;")
-            self.btn_calib.setStyleSheet(self.btn_calib.styleSheet())
-        else:
-            self.btn_calib.setStyleSheet(self.btn_calib.styleSheet() + "\nfont-weight: 700;")
-            self.btn_main.setStyleSheet(self.btn_main.styleSheet())
-
-    def _set_captured_inventory_ui(self, token: str) -> None:
-        box: QLabel = getattr(self.inv_row, "_gw_display_box")  # type: ignore[attr-defined]
-        btn: QPushButton = getattr(self.inv_row, "_gw_button")  # type: ignore[attr-defined]
-        box.setText(f"[ {self._friendly_token(token)} ]")
-        self._flash_value_label(box)
-        self._flash_button_success(btn)
-        self._update_start_enabled()
-
-    def _set_captured_tek_ui(self, token: str) -> None:
-        box: QLabel = getattr(self.tek_row, "_gw_display_box")  # type: ignore[attr-defined]
-        btn: QPushButton = getattr(self.tek_row, "_gw_button")  # type: ignore[attr-defined]
-        box.setText(f"[ {self._friendly_token(token)} ]")
-        self._flash_value_label(box)
-        self._flash_button_success(btn)
-        self._update_start_enabled()
-
-    def _set_template_status_ui(self, ok: bool, path: str) -> None:
-        box: QLabel = getattr(self.tmpl_row, "_gw_display_box")  # type: ignore[attr-defined]
-        btn: QPushButton = getattr(self.tmpl_row, "_gw_button")  # type: ignore[attr-defined]
+        box = self._cal_boxes.get("template")
+        if not box:
+            return
         if ok:
             box.setText("[ Captured ]")
-            box.setToolTip(path)
-            self._flash_value_label(box)
-            self._flash_button_success(btn)
+            box.setToolTip(path or "")
+            box.setProperty("state", "done")
         else:
             box.setText(self.NONE_DISPLAY)
             box.setToolTip("")
+            box.setProperty("state", "pending")
+        box.style().unpolish(box); box.style().polish(box)
         self._update_start_enabled()
 
-    # ---- Feedback animations ----
-    def _success_flash_ui(self, text: str, duration_ms: int) -> None:
-        if text:
-            self.status.setText(text)
-        if self._status_flash_timer:
-            try:
-                self._status_flash_timer.stop()
-            except Exception:
-                pass
-        self._status_flash_timer = QTimer(self.window)
-        base_css = f"color: {self.GRAY}"
-        steps = max(8, min(40, duration_ms // 50))
-        interval = max(16, duration_ms // steps)
-        i = {"v": 0}
-
-        def step():
-            i["v"] += 1
-            t = i["v"] / steps
-            # neon green -> base
-            r, g, b = 0, int(255 + (224 - 255) * t), int(170 + (224 - 170) * t)
-            self.status.setStyleSheet(f"color: rgb({r},{g},{b})")
-            if i["v"] >= steps:
-                self._status_flash_timer.stop()
-                self.status.setStyleSheet(base_css)
-
-        self.status.setStyleSheet("color: #00ffaa")
-        self._status_flash_timer.timeout.connect(step)
-        self._status_flash_timer.start(interval)
-
-    def _flash_value_label(self, label: QLabel, duration_ms: int = 1200) -> None:
-        # Cancel prior timer for this label
-        if label in self._value_flash_timers:
-            try:
-                self._value_flash_timers[label].stop()
-            except Exception:
-                pass
-        timer = QTimer(self.window)
-        self._value_flash_timers[label] = timer
-        steps = max(10, min(50, duration_ms // 40))
-        interval = max(16, duration_ms // steps)
-        i = {"v": 0}
-
-        def style_for(t: float) -> str:
-            g = int(255 + (216 - 255) * t)
-            b = int(170 + (255 - 170) * t)
-            border = f"rgba(0,216,255,{0.75 - 0.45 * t:.2f})"
-            return (
-                f"border: 1px solid {border}; border-radius: 4px; padding: 3px 8px; "
-                f"color: rgb(0,{g},{b});"
-            )
-
-        def step():
-            i["v"] += 1
-            t = i["v"] / steps
-            label.setStyleSheet(style_for(t))
-            if i["v"] >= steps:
-                timer.stop()
-                label.setStyleSheet("")
-                label.setProperty("class", "keybox")
-
-        label.setStyleSheet(style_for(0.0))
-        timer.timeout.connect(step)
-        timer.start(interval)
-
-    def _flash_button_success(self, btn: QPushButton, duration_ms: int = 260) -> None:
+    # ------ Compatibility API used by HotkeyManager ------
+    def set_status(self, text: str) -> None:
         try:
-            base = btn.styleSheet()
-            btn.setStyleSheet(
-                """
-                QPushButton {
-                    color: #0a0a0a;
-                    background-color: #00ffaa;
-                    border: 1px solid rgba(0,255,170,1.0);
-                    border-radius: 6px;
-                    font-weight: bold;
-                }
-                """
-            )
-            QTimer.singleShot(duration_ms, lambda: btn.setStyleSheet(base))
+            self.status_label.setText(text or "")
         except Exception:
             pass
 
-    # ---- Hotkey line highlight (main page) ----
-    def _flash_line_ui(self, hotkey: str, duration_ms: int) -> None:
-        lab = self._hotkey_labels.get(hotkey)
-        if not lab:
+    def prompt_key_capture(self, prompt: str) -> None:
+        self.set_status(prompt)
+
+    def set_visible(self, visible: bool) -> None:
+        try:
+            self.setVisible(bool(visible))
+        except Exception:
+            pass
+
+    def switch_to_calibration(self) -> None:
+        try:
+            # Reset auto-start state on entering calibration
+            self._start_emitted = False
+            self._switch_tab(1)
+            # In case values were prefilled, this can auto-start immediately
+            self._update_start_enabled()
+        except Exception:
+            pass
+
+    def switch_to_main(self) -> None:
+        try:
+            self._switch_tab(0)
+        except Exception:
+            pass
+
+    def success_flash(self, message: str, duration_ms: int = 1200) -> None:
+        """Temporarily show a success message in green, then restore previous."""
+        try:
+            prev_text = self.status_label.text()
+            prev_style = self.status_label.styleSheet()
+            self.status_label.setText(message)
+            self.status_label.setStyleSheet(f"color: {STATUS_OK};")
+
+            def _restore():
+                try:
+                    self.status_label.setText(prev_text)
+                    self.status_label.setStyleSheet(prev_style)
+                except Exception:
+                    pass
+
+            QTimer.singleShot(int(max(0, duration_ms)), _restore)
+        except Exception:
+            pass
+
+    def show_window(self):
+        self.show()
+        QTimer.singleShot(0, self._anchor_top_right)
+
+    def _anchor_top_right(self):
+        # Determine target screen: prefer current window screen, fallback to primary
+        screen = self.screen() or QGuiApplication.primaryScreen()
+        if not screen:
             return
-        self._highlight_key_label(lab, duration_ms)
+        g = screen.availableGeometry()
+        margin = spx(16)
+        fw = self.frameGeometry().width() or self.width()
+        x = g.x() + g.width() - fw - margin
+        y = g.y() + margin
+        self.move(max(g.x(), x), max(g.y(), y))
 
-    def _hold_line_ui(self, hotkey: str) -> None:
-        lab = self._hotkey_labels.get(hotkey)
-        if not lab:
-            return
-        lab.setStyleSheet("border: 1px solid #00ffaa; color: #00ffaa; border-radius: 4px; padding: 3px 8px;")
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        # Keep anchored top-right on resize
+        self._anchor_top_right()
 
-    def _clear_line_ui(self, hotkey: str, duration_ms: int) -> None:
-        # Delegate to _flash_line_ui to avoid duplicate implementation
-        self._flash_line_ui(hotkey, duration_ms)
-
-    def _highlight_key_label(self, lab: QLabel, duration_ms: int) -> None:
-        steps = max(12, min(60, duration_ms // 40))
-        interval = max(16, duration_ms // steps)
-        i = {"v": 0}
-
-        def step():
-            i["v"] += 1
-            t = i["v"] / steps
-            g = int(255 + (216 - 255) * t)
-            b = int(170 + (255 - 170) * t)
-            lab.setStyleSheet(
-                f"border: 1px solid rgba(0,216,255,{0.75 - 0.45 * t:.2f}); "
-                f"color: rgb(0,{g},{b}); border-radius: 4px; padding: 3px 8px;"
-            )
-            if i["v"] >= steps:
-                lab.setStyleSheet("")
-                timer.stop()
-
-        timer = QTimer(self.window)
-        timer.timeout.connect(step)
-        timer.start(interval)
-
-    # ---- Helpers ----
-    def _update_start_enabled(self) -> None:
-        inv_box: QLabel = getattr(self.inv_row, "_gw_display_box")  # type: ignore[attr-defined]
-        tek_box: QLabel = getattr(self.tek_row, "_gw_display_box")  # type: ignore[attr-defined]
-        tmpl_box: QLabel = getattr(self.tmpl_row, "_gw_display_box")  # type: ignore[attr-defined]
-        inv_ok = inv_box.text().strip() not in (self.NONE_DISPLAY, "[None]", "")
-        tek_ok = tek_box.text().strip() not in (self.NONE_DISPLAY, "[None]", "")
-        tmpl_ok = tmpl_box.text().strip().lower().startswith("[ captured")
-        self.btn_start.setEnabled(bool(inv_ok and tek_ok and tmpl_ok))
+    # ------ Helpers ------
+    def _update_start_enabled(self):
+        inv_ok = self._cal_boxes.get("inventory") and self._cal_boxes["inventory"].property("state") == "done"
+        tek_ok = self._cal_boxes.get("tek_cancel") and self._cal_boxes["tek_cancel"].property("state") == "done"
+        tmpl_ok = self._cal_boxes.get("template") and self._cal_boxes["template"].text().lower().startswith("[ captured")
+        ready = bool(inv_ok and tek_ok and tmpl_ok)
+        # Auto-emit start once when all three are ready
+        if ready and not self._start_emitted:
+            self._start_emitted = True
+            try:
+                self.signals.start.emit()
+            except Exception:
+                pass
 
     @staticmethod
     def _friendly_token(token: str) -> str:
@@ -612,3 +484,10 @@ class OverlayWindow:
         if tl.startswith("mouse_"):
             return t[6:]
         return t or "?"
+
+
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    w = OverlayWindow()
+    w.show_window()
+    sys.exit(app.exec())

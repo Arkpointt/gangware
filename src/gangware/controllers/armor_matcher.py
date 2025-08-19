@@ -24,6 +24,7 @@ import logging
 
 # Tier priority (highest to lowest)
 TIER_ORDER: List[str] = [
+    "tek",  # untiered tek templates
     "ascendant",
     "mastercraft",
     "journeyman",
@@ -34,6 +35,7 @@ TIER_ORDER: List[str] = [
 
 # Restrict matching to these tiers and names
 ALLOWED_TIERS: List[str] = [
+    "tek",
     "ascendant",
     "mastercraft",
 ]
@@ -47,6 +49,12 @@ ALLOWED_NAMES: List[str] = [
     "flak_leggings",
     "flak_legs",
     "flak_boots",
+    # Tek variants
+    "tek_helmet",
+    "tek_chestpiece",
+    "tek_gauntlets",
+    "tek_leggings",
+    "tek_boots",
 ]
 
 # Filename aliasing for common misspellings or legacy assets

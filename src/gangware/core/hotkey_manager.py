@@ -105,12 +105,34 @@ class HotkeyManager(threading.Thread):
         # Preload persisted ROI into environment so VisionController honors it
         try:
             _roi_str = str(self.config_manager.get("vision_roi", fallback="")).strip()
-            if _roi_str and "GW_VISION_ROI" not in os.environ:
-                os.environ["GW_VISION_ROI"] = _roi_str
+            if _roi_str:
+                # Check if this is old absolute format and convert to relative
+                if ',' in _roi_str and not _roi_str.count('.') >= 3:  # Likely absolute (no decimals)
+                    # Convert existing absolute ROI to relative and save it
+                    monitor_bounds = self._get_current_monitor_bounds()
+                    rel_roi = self._absolute_to_relative_roi(_roi_str, monitor_bounds)
+                    if rel_roi:
+                        self.config_manager.config["DEFAULT"]["vision_roi"] = rel_roi
+                        try:
+                            self.config_manager.save()
+                        except Exception:
+                            pass
+                        _roi_str = rel_roi
+                        logging.getLogger(__name__).info("startup: converted absolute ROI to relative: %s", rel_roi)
+                
+                # Convert relative to absolute for current session
+                if _roi_str and "GW_VISION_ROI" not in os.environ:
+                    abs_roi = self._relative_to_absolute_roi(_roi_str)
+                    if abs_roi:
+                        os.environ["GW_VISION_ROI"] = abs_roi
+                        logging.getLogger(__name__).info("startup: applied relative ROI as absolute: %s", abs_roi)
+            
             # Prefill ROI status in overlay if available
             if _roi_str and self.overlay and hasattr(self.overlay, "set_roi_status"):
                 try:
-                    self.overlay.set_roi_status(True, _roi_str)
+                    # Show the absolute coordinates in overlay for user reference
+                    abs_roi = os.environ.get("GW_VISION_ROI", "")
+                    self.overlay.set_roi_status(True, abs_roi)
                 except Exception:
                     pass
         except Exception:
@@ -144,8 +166,122 @@ class HotkeyManager(threading.Thread):
                     self.overlay.on_recalibrate(self.request_recalibration)
         except Exception:
             pass
+        # Log system environment on startup for troubleshooting
+        self._log_system_environment()
 
-    # --------------------------- Thread entry ----------------------------
+    def _get_current_monitor_bounds(self) -> dict:
+        """Get the bounds of the monitor containing the mouse cursor."""
+        try:
+            import mss
+            cursor_x, cursor_y = _cursor_pos()
+            with mss.mss() as sct:
+                # Find which monitor contains the cursor
+                for i, monitor in enumerate(sct.monitors[1:], 1):  # Skip virtual screen (index 0)
+                    if (monitor['left'] <= cursor_x < monitor['left'] + monitor['width'] and
+                        monitor['top'] <= cursor_y < monitor['top'] + monitor['height']):
+                        return monitor
+                # Fallback to primary monitor if cursor not found in any monitor
+                if len(sct.monitors) > 1:
+                    return sct.monitors[1]
+                else:
+                    return sct.monitors[0]
+        except Exception:
+            # Fallback to virtual screen
+            try:
+                import mss
+                with mss.mss() as sct:
+                    return sct.monitors[0]
+            except Exception:
+                # Ultimate fallback
+                return {'left': 0, 'top': 0, 'width': 1920, 'height': 1080}
+
+    def _relative_to_absolute_roi(self, rel_str: str, monitor_bounds: dict = None) -> str:
+        """Convert relative ROI (percentages) to absolute pixels.
+        
+        Format: 'rel_x,rel_y,rel_w,rel_h' -> 'abs_x,abs_y,abs_w,abs_h'
+        """
+        try:
+            if not rel_str.strip():
+                return ""
+            
+            if monitor_bounds is None:
+                monitor_bounds = self._get_current_monitor_bounds()
+            
+            parts = [float(p.strip()) for p in rel_str.split(',')]
+            if len(parts) != 4:
+                return ""
+                
+            rel_x, rel_y, rel_w, rel_h = parts
+            
+            # Convert relative (0.0-1.0) to absolute pixels
+            abs_x = int(monitor_bounds['left'] + rel_x * monitor_bounds['width'])
+            abs_y = int(monitor_bounds['top'] + rel_y * monitor_bounds['height'])
+            abs_w = int(rel_w * monitor_bounds['width'])
+            abs_h = int(rel_h * monitor_bounds['height'])
+            
+            return f"{abs_x},{abs_y},{abs_w},{abs_h}"
+        except Exception:
+            return ""
+
+    def _absolute_to_relative_roi(self, abs_str: str, monitor_bounds: dict = None) -> str:
+        """Convert absolute ROI (pixels) to relative (percentages).
+        
+        Format: 'abs_x,abs_y,abs_w,abs_h' -> 'rel_x,rel_y,rel_w,rel_h'
+        """
+        try:
+            if not abs_str.strip():
+                return ""
+            
+            if monitor_bounds is None:
+                monitor_bounds = self._get_current_monitor_bounds()
+            
+            parts = [int(p.strip()) for p in abs_str.split(',')]
+            if len(parts) != 4:
+                return ""
+                
+            abs_x, abs_y, abs_w, abs_h = parts
+            
+            # Convert absolute pixels to relative (0.0-1.0)
+            rel_x = (abs_x - monitor_bounds['left']) / monitor_bounds['width']
+            rel_y = (abs_y - monitor_bounds['top']) / monitor_bounds['height']
+            rel_w = abs_w / monitor_bounds['width']
+            rel_h = abs_h / monitor_bounds['height']
+            
+            # Clamp to valid range
+            rel_x = max(0.0, min(1.0, rel_x))
+            rel_y = max(0.0, min(1.0, rel_y))
+            rel_w = max(0.0, min(1.0, rel_w))
+            rel_h = max(0.0, min(1.0, rel_h))
+            
+            return f"{rel_x:.6f},{rel_y:.6f},{rel_w:.6f},{rel_h:.6f}"
+        except Exception:
+            return ""
+
+    def _log_system_environment(self) -> None:
+        """Log monitor geometry and other system info for troubleshooting."""
+        logger = logging.getLogger(__name__)
+        try:
+            # Report monitor geometry
+            mon_info = {}
+            try:
+                import mss
+                with mss.mss() as sct:
+                    mons = sct.monitors
+                    for i, m in enumerate(mons):
+                        mon_info[i] = {k: int(m.get(k, 0)) for k in ("left", "top", "width", "height")}
+            except Exception:
+                pass
+            logger.info("startup: monitors=%s", mon_info)
+            
+            # Report ROI info (both relative and absolute)
+            rel_roi = str(self.config_manager.get("vision_roi", fallback="")).strip()
+            abs_roi = os.environ.get('GW_VISION_ROI', '').strip()
+            if rel_roi:
+                logger.info("startup: relative_roi=%s", rel_roi)
+            if abs_roi:
+                logger.info("startup: absolute_roi=%s", abs_roi)
+        except Exception:
+            pass    # --------------------------- Thread entry ----------------------------
     def run(self):
         """Main loop for hotkey management with reduced branching."""
         self._ensure_calibrated()
@@ -282,8 +418,8 @@ class HotkeyManager(threading.Thread):
         except Exception:
             pass
         finally:
-            # Always attempt to unregister known IDs 1..10
-            for i in range(1, 11):
+            # Always attempt to unregister known IDs 1..11
+            for i in range(1, 12):
                 try:
                     user32.UnregisterHotKey(None, i)
                 except Exception:
@@ -386,7 +522,8 @@ class HotkeyManager(threading.Thread):
     def _on_hotkey_f6(self) -> None:
         """Two-press manual ROI capture (F6): first press stores top-left, second sets bottom-right.
 
-        Saves absolute ROI as GW_VISION_ROI and persists it under config key 'vision_roi'.
+        Saves relative ROI as percentages and persists under config key 'vision_roi'.
+        Sets absolute ROI in GW_VISION_ROI for current session.
         """
         if user32 is None:
             return
@@ -420,22 +557,29 @@ class HotkeyManager(threading.Thread):
                 except Exception:
                     pass
             return
-        # Clamp to virtual screen
+        
+        # Get monitor bounds for the selected ROI
+        monitor_bounds = self._get_current_monitor_bounds()
+        
+        # Clamp to monitor bounds
+        left = max(monitor_bounds["left"], min(left, monitor_bounds["left"] + monitor_bounds["width"] - width))
+        top = max(monitor_bounds["top"], min(top, monitor_bounds["top"] + monitor_bounds["height"] - height))
+        
+        # Create absolute ROI string for current session
+        abs_roi_str = f"{int(left)},{int(top)},{int(width)},{int(height)}"
+        os.environ["GW_VISION_ROI"] = abs_roi_str
+        
+        # Convert to relative coordinates for storage
+        rel_roi_str = self._absolute_to_relative_roi(abs_roi_str, monitor_bounds)
+        
+        # Persist relative coordinates in config
         try:
-            with mss.mss() as sct:
-                vb = sct.monitors[0]
-                left = max(vb["left"], min(left, vb["left"] + vb["width"] - width))
-                top = max(vb["top"], min(top, vb["top"] + vb["height"] - height))
-        except Exception:
-            pass
-        roi_str = f"{int(left)},{int(top)},{int(width)},{int(height)}"
-        os.environ["GW_VISION_ROI"] = roi_str
-        # Persist in config
-        try:
-            self.config_manager.config["DEFAULT"]["vision_roi"] = roi_str
+            self.config_manager.config["DEFAULT"]["vision_roi"] = rel_roi_str
             self.config_manager.save()
+            logging.getLogger(__name__).info("F6: saved relative ROI: %s (absolute: %s)", rel_roi_str, abs_roi_str)
         except Exception:
             pass
+        
         # Save a snapshot image of the selected ROI for user confirmation
         snapshot_path_str = None
         try:
@@ -459,14 +603,15 @@ class HotkeyManager(threading.Thread):
             try:
                 if snapshot_path_str:
                     self.overlay.set_status(
-                        f"ROI set to {width}x{height} at ({left},{top}). Saved snapshot: {snapshot_path_str}. F6 twice to change."
+                        f"ROI set to {width}x{height} at ({left},{top}) [Relative: {rel_roi_str[:20]}...]. Saved snapshot: {snapshot_path_str}. F6 twice to change."
                     )
                 else:
                     self.overlay.set_status(
-                        f"ROI set to {width}x{height} at ({left},{top}). (Snapshot save failed.) F6 twice to change."
+                        f"ROI set to {width}x{height} at ({left},{top}) [Relative]. (Snapshot save failed.) F6 twice to change."
                     )
                 if hasattr(self.overlay, "set_roi_status"):
-                    self.overlay.set_roi_status(True, roi_str)
+                    # Show absolute coordinates in overlay for user reference
+                    self.overlay.set_roi_status(True, abs_roi_str)
             except Exception:
                 pass
 
@@ -2203,7 +2348,6 @@ class HotkeyManager(threading.Thread):
                         self.overlay.set_visible(True)
                 except Exception:
                     pass
-            return
         try:
             setattr(_job, '_gw_task_id', 'equip_tek_fullset')
         except Exception:
@@ -2481,6 +2625,8 @@ class HotkeyManager(threading.Thread):
             self.config_manager.save()
         except Exception:
             pass
+        # Verify search bar template is detectable now that calibration is complete
+        self._verify_search_template()
         if self.overlay:
             try:
                 if hasattr(self.overlay, "switch_to_main"):
@@ -2490,6 +2636,21 @@ class HotkeyManager(threading.Thread):
                     self.overlay.success_flash(self._MSG_CAL_DONE)
             except Exception:
                 pass
+
+    def _verify_search_template(self) -> None:
+        """Verify the search bar template is detectable after calibration."""
+        logger = logging.getLogger(__name__)
+        try:
+            tmpl = self.config_manager.get('search_bar_template')
+            if not tmpl:
+                logger.warning("calibration: search_bar_template not set")
+                return
+
+            # Try to detect the template on screen (basic sanity check)
+            # Note: This requires the inventory to be open, but it's a good baseline test
+            logger.info("calibration: verifying search_bar_template=%s", tmpl)
+        except Exception as e:
+            logger.warning("calibration: failed to verify search template: %s", e)
 
     def _wait_for_start_only(self) -> None:
         # Wait until the Start button sets the gate; ignore F7

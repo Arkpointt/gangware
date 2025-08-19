@@ -142,6 +142,8 @@ class HotkeyManager(threading.Thread):
         if inv and tek and tmpl:
             if self.overlay:
                 try:
+                    # Prefill GUI with retained values so they remain visible
+                    self._prefill_overlay_panel()
                     self.overlay.set_status("Calibration complete. Application ready for use.")
                 except Exception:
                     pass

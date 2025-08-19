@@ -163,7 +163,7 @@ class OverlayWindow(QMainWindow):
         self._styles()
 
         # Size and initial position (scaled)
-        self.resize(spx(500), spx(520))
+        self.resize(spx(520), spx(520))
 
         # Re-anchor if the window's screen changes (multi-monitor support)
         try:
@@ -192,7 +192,7 @@ class OverlayWindow(QMainWindow):
 
         # Left column: COMBAT
         combat = self._section("COMBAT", [
-            ("Tek Dash", "Shift+R"),
+            ("Tek Punch", "Shift+R"),
             ("Medbrew", "Shift+Q"),
             ("Med HoT", "Shift+E"),
         ])
@@ -232,8 +232,9 @@ class OverlayWindow(QMainWindow):
         kb.setObjectName("section")
         glow(kb, self.CYAN, 22, 70)
         vb = QVBoxLayout(kb)
-        vb.setContentsMargins(spx(12), spx(10), spx(12), spx(10))
-        vb.setSpacing(spx(10))
+        # Slightly larger margins/spacing to prevent button/label clipping
+        vb.setContentsMargins(spx(10), spx(10), spx(10), spx(10))
+        vb.setSpacing(spx(8))
 
         t1 = QLabel("KEYBIND SETUP")
         t1.setObjectName("sectionTitle")
@@ -242,7 +243,7 @@ class OverlayWindow(QMainWindow):
 
         vb.addWidget(self._cal_row("inventory", "Set Inventory Key", "[ SET ]",
                                    lambda: self.signals.capture_inventory.emit()))
-        vb.addWidget(self._cal_row("tek_cancel", "Set Tek Dash Cancel Key", "[ SET ]",
+        vb.addWidget(self._cal_row("tek_cancel", "Set Tek Punch Cancel Key", "[ SET ]",
                                    lambda: self.signals.capture_tek.emit()))
         lay.addWidget(kb)
 
@@ -251,8 +252,9 @@ class OverlayWindow(QMainWindow):
         vs.setObjectName("section")
         glow(vs, self.CYAN, 22, 70)
         v2 = QVBoxLayout(vs)
-        v2.setContentsMargins(spx(12), spx(10), spx(12), spx(10))
-        v2.setSpacing(spx(10))
+        # Larger bottom margin to prevent clipping at the bottom border
+        v2.setContentsMargins(spx(10), spx(10), spx(10), spx(10))
+        v2.setSpacing(spx(8))
 
         t2 = QLabel("VISUAL SETUP")
         t2.setObjectName("sectionTitle")
@@ -261,17 +263,12 @@ class OverlayWindow(QMainWindow):
 
         v2.addWidget(self._cal_row("template", "Capture Search Bar (F8)", "[ CAPTURE ]",
                                    lambda: self.signals.capture_template.emit()))
+        # Bottom spacer to ensure text stays inside the rounded border
+        v2.addSpacing(spx(4))
         lay.addWidget(vs)
 
-        
-        # Make whole calibration page scrollable (safety)
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        scroll.setWidget(inner)
-        return scroll
+        # Fit calibration content without a scroll area
+        return inner
 
     # ------ Building blocks ------
     def _section(self, title: str, items: list[tuple[str, str]]):
@@ -304,18 +301,46 @@ class OverlayWindow(QMainWindow):
     def _cal_row(self, key: str, label: str, btn_text: str, on_click):
         row = QWidget()
         h = QHBoxLayout(row)
-        h.setContentsMargins(0, 0, 0, 0)
-        h.setSpacing(spx(8))
+        h.setContentsMargins(spx(6), spx(4), spx(6), spx(4))
+        h.setSpacing(spx(10))
         try:
             row.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            row.setMinimumHeight(spx(60))
         except Exception:
             pass
+        # Slightly increase vertical margins only for the template row to avoid glyph clipping
+        if key == "template":
+            try:
+                l, t, r, b = spx(6), spx(6), spx(6), spx(6)
+                h.setContentsMargins(l, t, r, b)
+            except Exception:
+                pass
 
         name_lbl = QLabel(label)
         name_lbl.setObjectName("item")
         try:
             name_lbl.setWordWrap(True)
             name_lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+            # Give multi-line labels a bit more breathing room
+            name_lbl.setMinimumHeight(spx(24))
+            # Add tiny inner margins to avoid top/bottom glyph clipping on some DPIs
+            try:
+                name_lbl.setContentsMargins(0, 0, 0, 0)
+            except Exception:
+                pass
+            # Specific fix: avoid vertical clipping for the "Capture Search Bar (F8)" row
+            if key == "template":
+                try:
+                    fm = name_lbl.fontMetrics()
+                    mh = max(spx(28), fm.height() + spx(6))
+                    name_lbl.setMinimumHeight(mh)
+                    name_lbl.setWordWrap(False)
+                    name_lbl.setMargin(spx(1))
+                    name_lbl.setContentsMargins(0, spx(2), 0, spx(2))
+                    name_lbl.setStyleSheet("padding-top: 3px; padding-bottom: 3px;")
+                except Exception:
+                    pass
+            name_lbl.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
         except Exception:
             pass
 
@@ -325,6 +350,7 @@ class OverlayWindow(QMainWindow):
         btn.clicked.connect(on_click)
         try:
             btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+            btn.setFixedHeight(spx(36))
         except Exception:
             pass
         glow(btn, self.CYAN, 20, 100)
@@ -332,7 +358,7 @@ class OverlayWindow(QMainWindow):
         box = QLabel(self.NONE_DISPLAY)
         box.setObjectName("statusBox")
         box.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        box.setFixedWidth(spx(120))
+        box.setFixedWidth(spx(140))
         box.setFixedHeight(spx(36))
         box.setProperty("state", "pending")
         box.style().unpolish(box); box.style().polish(box)
@@ -341,7 +367,7 @@ class OverlayWindow(QMainWindow):
 
         h.addWidget(name_lbl, 1)
         h.addWidget(btn, 0)
-        h.addSpacing(spx(8))
+        h.addSpacing(spx(12))
         h.addWidget(box, 0)
         return row
 

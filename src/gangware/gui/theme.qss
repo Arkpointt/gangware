@@ -3,24 +3,24 @@ QWidget {
   background: transparent;
   font-family: 'Orbitron', 'Segoe UI', Arial, sans-serif;
   color: #D5DCE3;
-  font-size: 11px;
+  font-size: 12px;
 }
 
 #card {
   background-color: rgba(10,20,30,0.85);
   border: 1px solid rgba(0,221,255,0.40);
-  border-radius: 9px;
+  border-radius: 10px;
 }
 
 #title {
-  font-size: 34px;
+  font-size: 37px;
   font-weight: 800;
   letter-spacing: 6px;
   color: #00DDFF;
   padding-top: 2px;
 }
 #subtitle {
-  font-size: 10px;
+  font-size: 11px;
   color: #D5DCE3;
   letter-spacing: 1px;
 }
@@ -33,11 +33,11 @@ QWidget {
 #tab {
   font-weight: 700;
   color: #ffffff;
-  border-radius: 5px;
+  border-radius: 6px;
   border: 1px solid rgba(0,221,255,0.40);
   background-color: rgba(0,221,255,0.16);
-  padding: 5px 11px;
-  min-height: 26px;
+  padding: 6px 12px;
+  min-height: 29px;
 }
 #tab:hover { background-color: rgba(0,221,255,0.28); }
 #tab:checked {
@@ -53,12 +53,13 @@ QWidget {
 #sectionTitle {
   color: #FFB800;
   font-weight: 800;
-  font-size: 18px;
+  font-size: 19px;
   margin-bottom: 2px;
 }
 #item {
   color: #E6EBF1;
   font-weight: 600;
+  padding: 2px 0px; /* add breathing room to avoid glyph clipping on some DPI/fonts */
 }
 
 #keycap {
@@ -67,7 +68,7 @@ QWidget {
   background-color: rgba(15,30,45,0.92);
   border: 2px solid rgba(0,221,255,0.45);
   border-radius: 7px;
-  padding: 4px 8px;
+  padding: 4px 9px;
 }
 
 /* Small button uses the same spec as keycap for unified badges */
@@ -77,7 +78,7 @@ QWidget {
   background-color: rgba(15,30,45,0.92);
   border: 2px solid rgba(0,221,255,0.45);
   border-radius: 7px;
-  padding: 4px 8px;
+  padding: 4px 9px;
 }
 #smallBtn:hover { background-color: rgba(0,221,255,0.28); }
 
@@ -101,7 +102,7 @@ QWidget {
 }
 
 #status { color: #7FE6FF; letter-spacing: 2px; }
-#calTitle { color: #FFB800; font-size: 18px; font-weight: 800; }
+#calTitle { color: #FFB800; font-size: 19px; font-weight: 800; }
 #hint { color: #D5DCE3; }
 
 /* Optional operational variant for green status */

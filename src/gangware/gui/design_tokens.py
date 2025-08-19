@@ -2,8 +2,8 @@
 Do not change values here without updating the blueprint and tests.
 """
 
-# Global scale (0.66 ≈ 34% reduction). All px tokens derive from BASE * UI_SCALE
-UI_SCALE = 0.66
+# Global scale (0.72 ≈ 28% reduction). All px tokens derive from BASE * UI_SCALE
+UI_SCALE = 0.72  # small uplift to remove subtle label clipping
 
 # Helper (module-internal)
 def _spx(n: float) -> int:

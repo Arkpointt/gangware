@@ -119,14 +119,14 @@ class HotkeyManager(threading.Thread):
                             pass
                         _roi_str = rel_roi
                         logging.getLogger(__name__).info("startup: converted absolute ROI to relative: %s", rel_roi)
-                
+
                 # Convert relative to absolute for current session
                 if _roi_str and "GW_VISION_ROI" not in os.environ:
                     abs_roi = self._relative_to_absolute_roi(_roi_str)
                     if abs_roi:
                         os.environ["GW_VISION_ROI"] = abs_roi
                         logging.getLogger(__name__).info("startup: applied relative ROI as absolute: %s", abs_roi)
-            
+
             # Prefill ROI status in overlay if available
             if _roi_str and self.overlay and hasattr(self.overlay, "set_roi_status"):
                 try:
@@ -197,62 +197,62 @@ class HotkeyManager(threading.Thread):
 
     def _relative_to_absolute_roi(self, rel_str: str, monitor_bounds: dict = None) -> str:
         """Convert relative ROI (percentages) to absolute pixels.
-        
+
         Format: 'rel_x,rel_y,rel_w,rel_h' -> 'abs_x,abs_y,abs_w,abs_h'
         """
         try:
             if not rel_str.strip():
                 return ""
-            
+
             if monitor_bounds is None:
                 monitor_bounds = self._get_current_monitor_bounds()
-            
+
             parts = [float(p.strip()) for p in rel_str.split(',')]
             if len(parts) != 4:
                 return ""
-                
+
             rel_x, rel_y, rel_w, rel_h = parts
-            
+
             # Convert relative (0.0-1.0) to absolute pixels
             abs_x = int(monitor_bounds['left'] + rel_x * monitor_bounds['width'])
             abs_y = int(monitor_bounds['top'] + rel_y * monitor_bounds['height'])
             abs_w = int(rel_w * monitor_bounds['width'])
             abs_h = int(rel_h * monitor_bounds['height'])
-            
+
             return f"{abs_x},{abs_y},{abs_w},{abs_h}"
         except Exception:
             return ""
 
     def _absolute_to_relative_roi(self, abs_str: str, monitor_bounds: dict = None) -> str:
         """Convert absolute ROI (pixels) to relative (percentages).
-        
+
         Format: 'abs_x,abs_y,abs_w,abs_h' -> 'rel_x,rel_y,rel_w,rel_h'
         """
         try:
             if not abs_str.strip():
                 return ""
-            
+
             if monitor_bounds is None:
                 monitor_bounds = self._get_current_monitor_bounds()
-            
+
             parts = [int(p.strip()) for p in abs_str.split(',')]
             if len(parts) != 4:
                 return ""
-                
+
             abs_x, abs_y, abs_w, abs_h = parts
-            
+
             # Convert absolute pixels to relative (0.0-1.0)
             rel_x = (abs_x - monitor_bounds['left']) / monitor_bounds['width']
             rel_y = (abs_y - monitor_bounds['top']) / monitor_bounds['height']
             rel_w = abs_w / monitor_bounds['width']
             rel_h = abs_h / monitor_bounds['height']
-            
+
             # Clamp to valid range
             rel_x = max(0.0, min(1.0, rel_x))
             rel_y = max(0.0, min(1.0, rel_y))
             rel_w = max(0.0, min(1.0, rel_w))
             rel_h = max(0.0, min(1.0, rel_h))
-            
+
             return f"{rel_x:.6f},{rel_y:.6f},{rel_w:.6f},{rel_h:.6f}"
         except Exception:
             return ""
@@ -272,7 +272,7 @@ class HotkeyManager(threading.Thread):
             except Exception:
                 pass
             logger.info("startup: monitors=%s", mon_info)
-            
+
             # Report ROI info (both relative and absolute)
             rel_roi = str(self.config_manager.get("vision_roi", fallback="")).strip()
             abs_roi = os.environ.get('GW_VISION_ROI', '').strip()
@@ -557,21 +557,21 @@ class HotkeyManager(threading.Thread):
                 except Exception:
                     pass
             return
-        
+
         # Get monitor bounds for the selected ROI
         monitor_bounds = self._get_current_monitor_bounds()
-        
+
         # Clamp to monitor bounds
         left = max(monitor_bounds["left"], min(left, monitor_bounds["left"] + monitor_bounds["width"] - width))
         top = max(monitor_bounds["top"], min(top, monitor_bounds["top"] + monitor_bounds["height"] - height))
-        
+
         # Create absolute ROI string for current session
         abs_roi_str = f"{int(left)},{int(top)},{int(width)},{int(height)}"
         os.environ["GW_VISION_ROI"] = abs_roi_str
-        
+
         # Convert to relative coordinates for storage
         rel_roi_str = self._absolute_to_relative_roi(abs_roi_str, monitor_bounds)
-        
+
         # Persist relative coordinates in config
         try:
             self.config_manager.config["DEFAULT"]["vision_roi"] = rel_roi_str
@@ -579,7 +579,7 @@ class HotkeyManager(threading.Thread):
             logging.getLogger(__name__).info("F6: saved relative ROI: %s (absolute: %s)", rel_roi_str, abs_roi_str)
         except Exception:
             pass
-        
+
         # Save a snapshot image of the selected ROI for user confirmation
         snapshot_path_str = None
         try:
@@ -764,7 +764,7 @@ class HotkeyManager(threading.Thread):
             _t.sleep(min(0.05, remain))
 
     def _hot_on_finish(self) -> None:
-        # Clear active line with nice fade
+        # Clear active line with smooth fade animation
         try:
             if self.overlay and hasattr(self.overlay, "clear_hotkey_line_active"):
                 self.overlay.clear_hotkey_line_active(self.HOTKEY_SHIFT_E, fade_duration_ms=2400)
@@ -895,6 +895,7 @@ class HotkeyManager(threading.Thread):
 
     # --------------------------- Recalibration orchestration ----------------------------
     def _process_recalibration(self) -> None:
+        """Handle recalibration request by showing menu and running calibration flow."""
         if not self._recalibrate_event.is_set():
             return
         self._log("Recalibration requested")
@@ -1075,6 +1076,7 @@ class HotkeyManager(threading.Thread):
         return special.get(vk, f"vk_{vk}")
 
     def _wait_key_release(self, vk: int, timeout: float = 1.0) -> None:
+        """Wait for a virtual key to be released, with timeout protection."""
         if user32 is None:
             return
         import time as _t
@@ -1103,7 +1105,7 @@ class HotkeyManager(threading.Thread):
                 if state & 0x8000:
                     result = self._process_pressed_vk(vk)
                     if result == "__debounce__":
-                        # small debounce handled in helper; skip to outer loop
+                        # Debounce delay handled in helper; continue polling
                         break
                     return result
             self._maybe_exit_on_f10()
@@ -1190,7 +1192,7 @@ class HotkeyManager(threading.Thread):
     # --------------------------- External API ----------------------------
     def request_recalibration(self) -> None:
         """External trigger (e.g., GUI) to request recalibration on the hotkey thread."""
-        # Ensure the calibration gate is open even if we're pre-start
+        # Ensure the calibration gate is open during pre-start phase
         try:
             self._calibration_gate.set()
         except Exception:
@@ -1222,6 +1224,7 @@ class HotkeyManager(threading.Thread):
 
     # --------------------------- Calibration menu helpers ----------------------------
     def _prefill_overlay_panel(self) -> None:
+        """Populate overlay calibration panel with current configuration values."""
         if not self.overlay:
             return
         try:
@@ -1325,7 +1328,7 @@ class HotkeyManager(threading.Thread):
                     if hasattr(input_controller, 'press_token'):
                         input_controller.press_token(inv_token)
                     else:
-                        # Fallback: if it's a key token, press key; else ignore
+                        # Fallback: press key token directly if available
                         name = inv_token.split('_', 1)[1] if '_' in inv_token else inv_token
                         if inv_token.startswith('key_'):
                             input_controller.press_key(name)
@@ -1346,11 +1349,10 @@ class HotkeyManager(threading.Thread):
                 if not tmpl:
                     self._log('Search bar template not set. Use F8 on Calibration page.')
                     return
-                # If user set a global absolute ROI via F6 (GW_VISION_ROI), do NOT constrain
-                # the search-bar detection with it; otherwise we might miss the bar.
-                # We'll reinterpret that ROI later as an inventory sub-ROI for item matching.
+                # F6 ROI constraints are bypassed for search-bar detection to ensure visibility.
+                # This ROI will be applied later as an inventory sub-region for item matching.
                 _abs_roi_env = os.environ.get('GW_VISION_ROI', '').strip()
-                # Retry a few times to allow UI to settle; press inventory again mid-way if needed
+                # Retry search with gradually relaxed confidence; re-open inventory if needed
                 coords = None
                 for attempt in range(5):
                     # Gradually relax confidence from 0.70 down to 0.50
@@ -1361,7 +1363,7 @@ class HotkeyManager(threading.Thread):
                     except Exception:
                         pass
                     try:
-                        # Temporarily disable GW_VISION_ROI so the template search scans the full window
+                        # Disable ROI constraints for full-window template search
                         _prev_abs = None
                         if _abs_roi_env:
                             try:
@@ -1604,8 +1606,8 @@ class HotkeyManager(threading.Thread):
                                     inter_left, inter_top = max(inv_left, abs_left), max(inv_top, abs_top)
                                     inter_right, inter_bottom = min(inv_right, abs_right), min(inv_bottom, abs_bottom)
 
-                                    # Debug logging to see what's happening
-                                    logging.getLogger(__name__).info("F6 ROI debug: F6=(%d,%d,%d,%d) inv=(%d,%d,%d,%d) intersection=(%d,%d,%d,%d)",
+                                    # Calculate intersection for ROI optimization
+                                    logging.getLogger(__name__).info("F6 ROI intersection: F6=(%d,%d,%d,%d) inv=(%d,%d,%d,%d) result=(%d,%d,%d,%d)",
                                                                      abs_left, abs_top, abs_w, abs_h,
                                                                      inv_left, inv_top, inv_w, inv_h,
                                                                      inter_left, inter_top, inter_right-inter_left, inter_bottom-inter_top)
@@ -1687,7 +1689,7 @@ class HotkeyManager(threading.Thread):
 
                         name_norm = str(text).strip().lower().replace(' ', '_')
                         start_match = _t.perf_counter()
-                        match = self._armor_matcher.best_for_name(roi_bgr, name_norm, threshold=0.25, early_exit=True)
+                        match = self._armor_matcher.best_for_name(roi_bgr, name_norm, threshold=0.22, early_exit=True)
                         dur_match = (_t.perf_counter() - start_match) * 1000.0
                         logging.getLogger(__name__).info("macro=F2 phase=match_item corr=%s name=%s duration_ms=%.1f found=%s", corr,
                                                          name_norm, dur_match, bool(match))
@@ -1736,7 +1738,7 @@ class HotkeyManager(threading.Thread):
                                 pass
 
                             start_equip = _t.perf_counter()
-                            # Ensure equip registers: quick double E with tiny gap
+                            # Ensure equip registers: double E press with minimal interval
                             input_controller.press_key('e', presses=1, interval=0.0)
                             try:
                                 _t.sleep(0.090)  # slight gap for game to register E
@@ -1827,6 +1829,15 @@ class HotkeyManager(threading.Thread):
         return _job
 
     def _task_equip_flak_fullset(self) -> Callable[[object, object], None]:
+        """
+        Create a task for equipping a complete Flak armor set (F2 hotkey).
+
+        Automatically searches for and equips all Flak armor pieces in sequence.
+        Supports multiple armor tiers (Ascendant, Mastercraft) with automatic detection.
+
+        Returns:
+            Callable task function for the worker queue
+        """
         pieces = [
             "Flak Helmet",
             "Flak Chestpiece",
@@ -2096,6 +2107,15 @@ class HotkeyManager(threading.Thread):
         return _job
 
     def _task_equip_tek_fullset(self) -> Callable[[object, object], None]:
+        """
+        Create a task for equipping a complete Tek armor set (F3 hotkey).
+
+        Automatically searches for and equips all Tek armor pieces in sequence.
+        Uses F6 ROI optimization when available for faster search bar detection.
+
+        Returns:
+            Callable task function for the worker queue
+        """
         pieces = [
             "Tek Helmet",
             "Tek Chestpiece",
@@ -2120,87 +2140,104 @@ class HotkeyManager(threading.Thread):
                     pass
                 _t.sleep(0.25)
 
-                # 2) Locate the search bar ONCE (reuse flak logic)
+                # 2) Locate the search bar ONCE (use F6 ROI shortcut if available)
                 tmpl = self.config_manager.get('search_bar_template')
                 if not tmpl:
                     self._log('Search bar template not set. Use F8 on Calibration page.')
                     return
                 _abs_roi_env = os.environ.get('GW_VISION_ROI', '').strip()
                 coords = None
-                for attempt in range(5):
-                    conf = max(0.50, 0.70 - 0.03 * attempt)
-                    _prev_abs = None
+
+                # Use F6 ROI for fast search bar positioning when available
+                if _abs_roi_env:
                     try:
-                        if _abs_roi_env:
-                            _prev_abs = os.environ.pop('GW_VISION_ROI', None)
-                        band = None
+                        parts = [int(p.strip()) for p in _abs_roi_env.split(',')]
+                        if len(parts) == 4:
+                            roi_left, roi_top, roi_w, roi_h = parts
+                            # Calculate search bar position relative to inventory area
+                            search_x = roi_left + int(roi_w * 0.15)  # 15% from left edge
+                            search_y = max(50, roi_top - 50)  # 50px above ROI, minimum 50px from top
+                            coords = (search_x, search_y)
+                            logging.getLogger(__name__).info("F3 Tek: using F6 ROI to estimate search bar position (%d,%d)", search_x, search_y)
+                    except Exception:
+                        coords = None
+
+                # Fall back to template matching if F6 optimization unavailable
+                if coords is None:
+                    for attempt in range(5):
+                        conf = max(0.50, 0.70 - 0.03 * attempt)
+                        _prev_abs = None
                         try:
-                            inv_hint = None
                             if _abs_roi_env:
-                                parts = [int(p.strip()) for p in _abs_roi_env.split(',')]
-                                if len(parts) == 4:
-                                    inv_hint = { 'left': parts[0], 'top': parts[1], 'width': parts[2], 'height': parts[3] }
-                            if inv_hint is None:
-                                inv0 = getattr(vision_controller, 'inventory_roi', None)
-                                if isinstance(inv0, dict) and inv0.get('width', 0) > 0 and inv0.get('height', 0) > 0:
-                                    inv_hint = inv0
-                            if inv_hint is not None:
-                                L = int(inv_hint.get('left', 0)); T = int(inv_hint.get('top', 0)); W = int(inv_hint.get('width', 0)); H = int(inv_hint.get('height', 0))
-                                band_h = max(100, min(260, int(H * 0.40)))
-                                band_top = max(0, T - band_h - int(H * 0.05))
-                                band_left = max(0, L - int(W * 0.05))
-                                band_w = int(W + int(W * 0.10))
-                                try:
-                                    import mss
-                                    with mss.mss() as sct:
-                                        vb = sct.monitors[0]
-                                        band_left = max(vb['left'], min(band_left, vb['left'] + vb['width'] - band_w))
-                                        band_top = max(vb['top'], min(band_top, vb['top'] + vb['height'] - band_h))
-                                except Exception:
-                                    pass
-                                band = { 'left': int(band_left), 'top': int(band_top), 'width': int(band_w), 'height': int(band_h) }
-                        except Exception:
+                                _prev_abs = os.environ.pop('GW_VISION_ROI', None)
                             band = None
-                        prev_manual_roi = getattr(vision_controller, 'search_roi', None)
-                        try:
-                            if band is not None and hasattr(vision_controller, 'set_search_roi'):
-                                vision_controller.set_search_roi(band)
-                            _prev_fast = os.environ.get('GW_VISION_FAST_ONLY')
                             try:
-                                os.environ['GW_VISION_FAST_ONLY'] = '1'
-                                coords = vision_controller.find_template(str(tmpl), confidence=conf)
+                                inv_hint = None
+                                if _abs_roi_env:
+                                    parts = [int(p.strip()) for p in _abs_roi_env.split(',')]
+                                    if len(parts) == 4:
+                                        inv_hint = { 'left': parts[0], 'top': parts[1], 'width': parts[2], 'height': parts[3] }
+                                if inv_hint is None:
+                                    inv0 = getattr(vision_controller, 'inventory_roi', None)
+                                    if isinstance(inv0, dict) and inv0.get('width', 0) > 0 and inv0.get('height', 0) > 0:
+                                        inv_hint = inv0
+                                if inv_hint is not None:
+                                    L = int(inv_hint.get('left', 0)); T = int(inv_hint.get('top', 0)); W = int(inv_hint.get('width', 0)); H = int(inv_hint.get('height', 0))
+                                    band_h = max(100, min(260, int(H * 0.40)))
+                                    band_top = max(0, T - band_h - int(H * 0.05))
+                                    band_left = max(0, L - int(W * 0.05))
+                                    band_w = int(W + int(W * 0.10))
+                                    try:
+                                        import mss
+                                        with mss.mss() as sct:
+                                            vb = sct.monitors[0]
+                                            band_left = max(vb['left'], min(band_left, vb['left'] + vb['width'] - band_w))
+                                            band_top = max(vb['top'], min(band_top, vb['top'] + vb['height'] - band_h))
+                                    except Exception:
+                                        pass
+                                    band = { 'left': int(band_left), 'top': int(band_top), 'width': int(band_w), 'height': int(band_h) }
+                            except Exception:
+                                band = None
+                            prev_manual_roi = getattr(vision_controller, 'search_roi', None)
+                            try:
+                                if band is not None and hasattr(vision_controller, 'set_search_roi'):
+                                    vision_controller.set_search_roi(band)
+                                _prev_fast = os.environ.get('GW_VISION_FAST_ONLY')
+                                try:
+                                    os.environ['GW_VISION_FAST_ONLY'] = '1'
+                                    coords = vision_controller.find_template(str(tmpl), confidence=conf)
+                                finally:
+                                    try:
+                                        if _prev_fast is None:
+                                            os.environ.pop('GW_VISION_FAST_ONLY', None)
+                                        else:
+                                            os.environ['GW_VISION_FAST_ONLY'] = _prev_fast
+                                    except Exception:
+                                        pass
                             finally:
                                 try:
-                                    if _prev_fast is None:
-                                        os.environ.pop('GW_VISION_FAST_ONLY', None)
-                                    else:
-                                        os.environ['GW_VISION_FAST_ONLY'] = _prev_fast
+                                    if hasattr(vision_controller, 'clear_search_roi'):
+                                        vision_controller.clear_search_roi()
+                                    if prev_manual_roi is not None and hasattr(vision_controller, 'set_search_roi'):
+                                        vision_controller.set_search_roi(prev_manual_roi)
                                 except Exception:
                                     pass
                         finally:
+                            if _abs_roi_env and _prev_abs is not None:
+                                os.environ['GW_VISION_ROI'] = _prev_abs
+                        if coords:
+                            break
+                        if attempt == 2:
                             try:
-                                if hasattr(vision_controller, 'clear_search_roi'):
-                                    vision_controller.clear_search_roi()
-                                if prev_manual_roi is not None and hasattr(vision_controller, 'set_search_roi'):
-                                    vision_controller.set_search_roi(prev_manual_roi)
+                                if hasattr(input_controller, 'press_token'):
+                                    input_controller.press_token(inv_token)
+                                else:
+                                    name = inv_token.split('_', 1)[1] if '_' in inv_token else inv_token
+                                    if inv_token.startswith('key_'):
+                                        input_controller.press_key(name)
                             except Exception:
                                 pass
-                    finally:
-                        if _abs_roi_env and _prev_abs is not None:
-                            os.environ['GW_VISION_ROI'] = _prev_abs
-                    if coords:
-                        break
-                    if attempt == 2:
-                        try:
-                            if hasattr(input_controller, 'press_token'):
-                                input_controller.press_token(inv_token)
-                            else:
-                                name = inv_token.split('_', 1)[1] if '_' in inv_token else inv_token
-                                if inv_token.startswith('key_'):
-                                    input_controller.press_key(name)
-                        except Exception:
-                            pass
-                    _t.sleep(0.04)
+                        _t.sleep(0.04)
                 if not coords:
                     self._log('Search bar not found — aborting tek fullset equip.')
                     return
@@ -2216,6 +2253,7 @@ class HotkeyManager(threading.Thread):
                                 'width': int(parts[2]), 'height': int(parts[3])
                             }
                             vision_controller.inventory_roi = inv_roi
+                            logging.getLogger(__name__).info("F6 ROI: using F6 ROI directly for speed (skipping calibration)")
                     except Exception:
                         inv_roi = None
                 if inv_roi is None:
@@ -2355,6 +2393,19 @@ class HotkeyManager(threading.Thread):
         return _job
 
     def _task_equip_mixed_fullset(self) -> Callable[[object, object], None]:
+        """
+        Create a task for equipping a mixed armor set configuration (F4 hotkey).
+
+        Equips an optimized mixed set:
+        - Flak Helmet (protection focus)
+        - Tek Chestpiece (durability and stats)
+        - Tek Gauntlets (advanced features)
+        - Flak Leggings (mobility)
+        - Flak Boots (comfort and protection)
+
+        Returns:
+            Callable task function for the worker queue
+        """
         pieces = [
             "Flak Helmet",
             "Tek Chestpiece",
@@ -2379,87 +2430,104 @@ class HotkeyManager(threading.Thread):
                     pass
                 _t.sleep(0.25)
 
-                # 2) Locate the search bar ONCE (same logic as F2)
+                # 2) Locate the search bar ONCE (use F6 ROI shortcut if available)
                 tmpl = self.config_manager.get('search_bar_template')
                 if not tmpl:
                     self._log('Search bar template not set. Use F8 on Calibration page.')
                     return
                 _abs_roi_env = os.environ.get('GW_VISION_ROI', '').strip()
                 coords = None
-                for attempt in range(5):
-                    conf = max(0.50, 0.70 - 0.03 * attempt)
-                    _prev_abs = None
+
+                # Use F6 ROI for fast search bar positioning when available
+                if _abs_roi_env:
                     try:
-                        if _abs_roi_env:
-                            _prev_abs = os.environ.pop('GW_VISION_ROI', None)
-                        band = None
+                        parts = [int(p.strip()) for p in _abs_roi_env.split(',')]
+                        if len(parts) == 4:
+                            roi_left, roi_top, roi_w, roi_h = parts
+                            # Calculate search bar position relative to inventory area
+                            search_x = roi_left + int(roi_w * 0.15)  # 15% from left edge
+                            search_y = max(50, roi_top - 50)  # 50px above ROI, minimum 50px from top
+                            coords = (search_x, search_y)
+                            logging.getLogger(__name__).info("F4 Mixed: using F6 ROI to estimate search bar position (%d,%d)", search_x, search_y)
+                    except Exception:
+                        coords = None
+
+                # Fall back to template matching if F6 optimization unavailable
+                if coords is None:
+                    for attempt in range(5):
+                        conf = max(0.50, 0.70 - 0.03 * attempt)
+                        _prev_abs = None
                         try:
-                            inv_hint = None
                             if _abs_roi_env:
-                                parts = [int(p.strip()) for p in _abs_roi_env.split(',')]
-                                if len(parts) == 4:
-                                    inv_hint = { 'left': parts[0], 'top': parts[1], 'width': parts[2], 'height': parts[3] }
-                            if inv_hint is None:
-                                inv0 = getattr(vision_controller, 'inventory_roi', None)
-                                if isinstance(inv0, dict) and inv0.get('width', 0) > 0 and inv0.get('height', 0) > 0:
-                                    inv_hint = inv0
-                            if inv_hint is not None:
-                                L = int(inv_hint.get('left', 0)); T = int(inv_hint.get('top', 0)); W = int(inv_hint.get('width', 0)); H = int(inv_hint.get('height', 0))
-                                band_h = max(100, min(260, int(H * 0.40)))
-                                band_top = max(0, T - band_h - int(H * 0.05))
-                                band_left = max(0, L - int(W * 0.05))
-                                band_w = int(W + int(W * 0.10))
-                                try:
-                                    import mss
-                                    with mss.mss() as sct:
-                                        vb = sct.monitors[0]
-                                        band_left = max(vb['left'], min(band_left, vb['left'] + vb['width'] - band_w))
-                                        band_top = max(vb['top'], min(band_top, vb['top'] + vb['height'] - band_h))
-                                except Exception:
-                                    pass
-                                band = { 'left': int(band_left), 'top': int(band_top), 'width': int(band_w), 'height': int(band_h) }
-                        except Exception:
+                                _prev_abs = os.environ.pop('GW_VISION_ROI', None)
                             band = None
-                        prev_manual_roi = getattr(vision_controller, 'search_roi', None)
-                        try:
-                            if band is not None and hasattr(vision_controller, 'set_search_roi'):
-                                vision_controller.set_search_roi(band)
-                            _prev_fast = os.environ.get('GW_VISION_FAST_ONLY')
                             try:
-                                os.environ['GW_VISION_FAST_ONLY'] = '1'
-                                coords = vision_controller.find_template(str(tmpl), confidence=conf)
+                                inv_hint = None
+                                if _abs_roi_env:
+                                    parts = [int(p.strip()) for p in _abs_roi_env.split(',')]
+                                    if len(parts) == 4:
+                                        inv_hint = { 'left': parts[0], 'top': parts[1], 'width': parts[2], 'height': parts[3] }
+                                if inv_hint is None:
+                                    inv0 = getattr(vision_controller, 'inventory_roi', None)
+                                    if isinstance(inv0, dict) and inv0.get('width', 0) > 0 and inv0.get('height', 0) > 0:
+                                        inv_hint = inv0
+                                if inv_hint is not None:
+                                    L = int(inv_hint.get('left', 0)); T = int(inv_hint.get('top', 0)); W = int(inv_hint.get('width', 0)); H = int(inv_hint.get('height', 0))
+                                    band_h = max(100, min(260, int(H * 0.40)))
+                                    band_top = max(0, T - band_h - int(H * 0.05))
+                                    band_left = max(0, L - int(W * 0.05))
+                                    band_w = int(W + int(W * 0.10))
+                                    try:
+                                        import mss
+                                        with mss.mss() as sct:
+                                            vb = sct.monitors[0]
+                                            band_left = max(vb['left'], min(band_left, vb['left'] + vb['width'] - band_w))
+                                            band_top = max(vb['top'], min(band_top, vb['top'] + vb['height'] - band_h))
+                                    except Exception:
+                                        pass
+                                    band = { 'left': int(band_left), 'top': int(band_top), 'width': int(band_w), 'height': int(band_h) }
+                            except Exception:
+                                band = None
+                            prev_manual_roi = getattr(vision_controller, 'search_roi', None)
+                            try:
+                                if band is not None and hasattr(vision_controller, 'set_search_roi'):
+                                    vision_controller.set_search_roi(band)
+                                _prev_fast = os.environ.get('GW_VISION_FAST_ONLY')
+                                try:
+                                    os.environ['GW_VISION_FAST_ONLY'] = '1'
+                                    coords = vision_controller.find_template(str(tmpl), confidence=conf)
+                                finally:
+                                    try:
+                                        if _prev_fast is None:
+                                            os.environ.pop('GW_VISION_FAST_ONLY', None)
+                                        else:
+                                            os.environ['GW_VISION_FAST_ONLY'] = _prev_fast
+                                    except Exception:
+                                        pass
                             finally:
                                 try:
-                                    if _prev_fast is None:
-                                        os.environ.pop('GW_VISION_FAST_ONLY', None)
-                                    else:
-                                        os.environ['GW_VISION_FAST_ONLY'] = _prev_fast
+                                    if hasattr(vision_controller, 'clear_search_roi'):
+                                        vision_controller.clear_search_roi()
+                                    if prev_manual_roi is not None and hasattr(vision_controller, 'set_search_roi'):
+                                        vision_controller.set_search_roi(prev_manual_roi)
                                 except Exception:
                                     pass
                         finally:
+                            if _abs_roi_env and _prev_abs is not None:
+                                os.environ['GW_VISION_ROI'] = _prev_abs
+                        if coords:
+                            break
+                        if attempt == 2:
                             try:
-                                if hasattr(vision_controller, 'clear_search_roi'):
-                                    vision_controller.clear_search_roi()
-                                if prev_manual_roi is not None and hasattr(vision_controller, 'set_search_roi'):
-                                    vision_controller.set_search_roi(prev_manual_roi)
+                                if hasattr(input_controller, 'press_token'):
+                                    input_controller.press_token(inv_token)
+                                else:
+                                    name = inv_token.split('_', 1)[1] if '_' in inv_token else inv_token
+                                    if inv_token.startswith('key_'):
+                                        input_controller.press_key(name)
                             except Exception:
                                 pass
-                    finally:
-                        if _abs_roi_env and _prev_abs is not None:
-                            os.environ['GW_VISION_ROI'] = _prev_abs
-                    if coords:
-                        break
-                    if attempt == 2:
-                        try:
-                            if hasattr(input_controller, 'press_token'):
-                                input_controller.press_token(inv_token)
-                            else:
-                                name = inv_token.split('_', 1)[1] if '_' in inv_token else inv_token
-                                if inv_token.startswith('key_'):
-                                    input_controller.press_key(name)
-                        except Exception:
-                            pass
-                    _t.sleep(0.04)
+                        _t.sleep(0.04)
                 if not coords:
                     self._log('Search bar not found — aborting mixed fullset equip.')
                     return
@@ -2548,9 +2616,11 @@ class HotkeyManager(threading.Thread):
                         name_norm = str(disp).strip().lower().replace(' ', '_')
                         roi_bgr, roi_region = vision_controller.grab_inventory_bgr()
                         match = None
+                        # Apply optimized threshold for Tek Gauntlets detection accuracy
+                        threshold = 0.22 if name_norm == 'tek_gauntlets' else 0.25
                         for _try in range(6):  # allow brief UI update windows before giving up
                             try:
-                                match = self._armor_matcher.best_for_name(roi_bgr, name_norm, threshold=0.25, early_exit=True)
+                                match = self._armor_matcher.best_for_name(roi_bgr, name_norm, threshold=threshold, early_exit=True)
                             except Exception:
                                 match = None
                             if match:
@@ -2647,7 +2717,7 @@ class HotkeyManager(threading.Thread):
                 return
 
             # Try to detect the template on screen (basic sanity check)
-            # Note: This requires the inventory to be open, but it's a good baseline test
+            # Requires inventory to be open for template verification
             logger.info("calibration: verifying search_bar_template=%s", tmpl)
         except Exception as e:
             logger.warning("calibration: failed to verify search template: %s", e)
@@ -2714,6 +2784,7 @@ class HotkeyManager(threading.Thread):
                 pass
 
     def _log(self, msg: str) -> None:
+        """Log message to overlay UI if available, otherwise print to console."""
         # Small helper that updates overlay when available
         if self.overlay:
             self.overlay.set_status(msg)

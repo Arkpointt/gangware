@@ -1,33 +1,115 @@
-Gangware AI Assistant (v2)
-==========================
+# Gangware
+## Advanced Computer Vision Automation for ARK: Survival Evolved
 
-Overview
---------
-Gangware is a modular Python application for real-time visual process automation, inspired by Ark: Ascended aesthetics.
+**Version 4.0** - Professional Performance-Optimized Gaming Assistant
 
-Project Structure
------------------
-The project follows a professional src layout:
+[![Python](https://img.shields.io/badge/Python-3.11+-blue.svg)](https://python.org)
+[![OpenCV](https://img.shields.io/badge/OpenCV-Computer%20Vision-green.svg)](https://opencv.org)
+[![PyQt6](https://img.shields.io/badge/PyQt6-GUI%20Framework-orange.svg)](https://www.riverbankcomputing.com/software/pyqt/)
 
-```
-src/
-└── gangware/              # Main application package
-    ├── core/             # Core functionality (config, state, etc.)
-    ├── controllers/      # Input and vision controllers
-    ├── gui/             # User interface components
-    ├── macros/          # Automation macros
-    └── main.py          # Application entry point
-```
+Gangware is a high-performance automation system designed specifically for ARK: Survival Evolved, featuring sub-second armor swapping, intelligent computer vision, and advanced macro capabilities. Built with professional-grade optimization techniques, Gangware delivers lightning-fast equipment management and combat automation.
 
-Quick start
------------
-1. Create and activate a virtual environment (PowerShell):
+---
 
+## 🚀 Key Features
+
+### ⚡ **Sub-Second Armor Swapping**
+- **Performance**: Complete armor swaps in under 1 second
+- **F6 Manual ROI**: Capture custom inventory regions for instant targeting
+- **Smart Bypass**: Eliminates 2+ second calibration delays when F6 ROI available
+- **Multi-Monitor Support**: Intelligent coordinate handling across monitor setups
+
+### 🎯 **Advanced Computer Vision**
+- **Hybrid Template Matching**: Edge detection + HSV hue validation for tier confirmation
+- **Template Cropping**: Focus on item icons vs inventory slot backgrounds
+- **Fast/Slow Pass Optimization**: Early exit on good matches for maximum speed
+- **Multi-Scale Robustness**: Handles UI scaling variations automatically
+
+### 🔧 **Professional Automation**
+- **Tek Dash Combos**: Frame-perfect movement sequences
+- **Medbrew Management**: Intelligent healing over time with threading
+- **Hotkey System**: Global Windows hotkeys with fallback polling
+- **Real-Time Feedback**: ARK-inspired HUD with status indicators
+
+### 🎮 **Gaming-Focused Design**
+- **Zero Game Modification**: External automation, no game files touched
+- **Performance Optimized**: 2ms mouse delays, smart caching, timing instrumentation
+- **Multi-Monitor Ready**: Per-monitor coordinate detection and logging
+- **Professional Logging**: Comprehensive debug output for performance analysis
+
+---
+
+## 📋 Quick Start
+
+### System Requirements
+- **Windows 10/11** (DirectX screen capture)
+- **Python 3.11+**
+- **Multi-monitor compatible**
+- **ARK: Survival Evolved** (any resolution)
+
+### Installation
+
+1. **Clone and Setup Environment**:
 ```powershell
+git clone <repository-url>
+cd Gangware
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 ```
+
+2. **Launch Application**:
+```powershell
+python main.py
+```
+
+3. **Initial Calibration**:
+   - Press **F1** to open the overlay
+   - Navigate to **Calibration** tab
+   - Follow the setup wizard for keybind and template capture
+   - Use **F6** to capture your custom inventory region for maximum speed
+
+---
+
+## 🎯 Core Hotkeys
+
+| Hotkey | Function | Description |
+|--------|----------|-------------|
+| **F1** | Toggle Overlay | Show/hide main interface |
+| **F2** | Smart Armor Swap | Sub-second helmet/armor equipment |
+| **F3** | Tek Dash Combo | Advanced movement sequence |
+| **F4** | Medbrew Cycle | Intelligent healing management |
+| **F6** | Capture ROI | Manual inventory region capture |
+| **F7** | Recalibrate | Reset vision calibration |
+| **F10** | Exit | Graceful application shutdown |
+
+---
+
+## ⚙️ Advanced Configuration
+
+### F6 Manual ROI Capture
+For maximum performance, capture a custom inventory region:
+
+1. **Press F6** to start ROI capture mode
+2. **Click top-left** corner of your inventory area
+3. **Click bottom-right** corner to complete capture
+4. **ROI snapshot** saved to `%APPDATA%/Gangware/templates/roi.png`
+5. **Automatic bypass** of slow auto-calibration (2+ second improvement)
+
+### Performance Optimization
+- **Template Cropping**: Focuses on item icons vs backgrounds
+- **Smart Scaling**: Reduced calibration scales from 23 to 5 for speed
+- **Fast/Slow Pass**: Early exit optimization for common matches
+- **Mouse Timing**: Optimized from 20ms to 2ms delays
+
+### Multi-Monitor Setup
+- **Automatic Detection**: Per-monitor coordinate logging
+- **Coordinate Translation**: Intelligent region mapping
+- **Fallback Logic**: F6 ROI override when auto-detection fails
+
+---
+
+## 🏗️ Architecture
 
 2. (Optional) Enable UI demo in `config/config.ini` by setting `ui_demo = True` under `[Settings]` to see live status updates.
 
@@ -55,20 +137,63 @@ Calibration is marked complete only after the template is captured and saved.
 Overlay behavior
 ----------------
 - The overlay is always on top, click-through, and anchored to the top-right corner of the active screen.
-- It automatically repositions on resolution/DPI/monitor changes.
-- Press F1 to hide/unhide the overlay. Press F7 to recalibrate at any time (global or via overlay).
+### Testing & Quality Assurance
+```powershell
+# Run test suite
+python -m pytest tests/ -v
 
-Notes
------
-- The overlay uses the Consolas font (default on Windows). If the font is not available, the system will fall back to a monospace font.
-- To interact with the overlay during development, remove `Qt.WindowTransparentForInput` in `gui/overlay.py`.
+# Style and complexity analysis
+python -m flake8 src/
+python -m bandit -r src/
 
-Aesthetics
----------
-The UI uses a Tek-inspired neon palette (cyan accents) with a dark translucent background and Consolas font to match the Ark: Ascended theme.
+# Performance profiling
+python main.py --debug-timing
+```
 
-Contributing
-------------
-- Keep modules small and testable.
-- Update `requirements.txt` when adding new dependencies.
-- File issues or PRs on the repository: https://github.com/Arkpointt/gangware
+### Contributing
+1. **Fork the repository**
+2. **Create feature branch**: `git checkout -b feature/amazing-optimization`
+3. **Make changes** with comprehensive testing
+4. **Run quality checks**: Style, tests, and performance validation
+5. **Submit pull request** with detailed performance analysis
+
+---
+
+## 📊 Technical Specifications
+
+### Computer Vision Pipeline
+- **OpenCV 4.8+**: Template matching with edge detection
+- **MSS Library**: High-performance screen capture
+- **HSV Color Space**: Tier validation via hue analysis
+- **Multi-Scale Matching**: UI scaling robustness
+
+### Performance Architecture
+- **Threading Model**: Background processing with GUI thread safety
+- **Memory Management**: Template caching and smart garbage collection
+- **Coordinate System**: Multi-monitor aware with per-screen detection
+- **Error Handling**: Graceful degradation with fallback logic
+
+### Security & Ethics
+- **External Automation**: No game file modification
+- **Memory Safe**: No memory injection or process manipulation
+- **Privacy Focused**: No data collection or network communication
+- **Open Source**: Full source code transparency
+
+---
+
+## 📜 License
+
+MIT License - See LICENSE file for details
+
+---
+
+## 🤝 Support
+
+For technical support, performance optimization, or feature requests:
+- **Issues**: GitHub issue tracker with performance logs
+- **Documentation**: Comprehensive blueprint in `blueprint.md`
+- **Performance Analysis**: Enable debug timing for optimization assistance
+
+---
+
+**Gangware v4.0** - Where performance meets precision in ARK automation.

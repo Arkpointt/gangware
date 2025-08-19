@@ -11,6 +11,7 @@ from .core.hotkey_manager import HotkeyManager
 from .core.worker import Worker
 from .controllers.vision import VisionController
 from .controllers.controls import InputController
+from .core.logging_setup import setup_logging
 
 
 def main() -> None:
@@ -25,6 +26,8 @@ def main() -> None:
     app = QApplication.instance() or QApplication([])
 
     config_manager = ConfigManager()
+    # Initialize logging very early
+    setup_logging(config_manager)
     state_manager = StateManager()
 
     # Check for calibration and essential settings

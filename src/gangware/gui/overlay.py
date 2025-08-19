@@ -58,6 +58,7 @@ class OverlaySignals(QObject):
     capture_inventory = pyqtSignal()
     capture_tek = pyqtSignal()
     capture_template = pyqtSignal()
+    capture_roi = pyqtSignal()
 
 
 class OverlayWindow(QMainWindow):
@@ -199,7 +200,7 @@ class OverlayWindow(QMainWindow):
 
         # Right column: ARMOR
         armor = self._section("ARMOR", [
-            ("Flak", "F2"),
+            ("Search Flak Helmet", "F2"),
             ("Tek", "F3"),
             ("Mixed", "F4"),
         ])
@@ -263,6 +264,8 @@ class OverlayWindow(QMainWindow):
 
         v2.addWidget(self._cal_row("template", "Capture Search Bar (F8)", "[ CAPTURE ]",
                                    lambda: self.signals.capture_template.emit()))
+        v2.addWidget(self._cal_row("roi", "Capture Manual ROI (F6)", "[ CAPTURE ]",
+                                   lambda: self.signals.capture_roi.emit()))
         # Bottom spacer to ensure text stays inside the rounded border
         v2.addSpacing(spx(4))
         lay.addWidget(vs)
@@ -447,6 +450,9 @@ class OverlayWindow(QMainWindow):
     def on_capture_template(self, slot):
         self.signals.capture_template.connect(slot)
 
+    def on_capture_roi(self, slot):
+        self.signals.capture_roi.connect(slot)
+
     # For external callers to push results back into the UI
     def set_captured_inventory(self, token: str) -> None:
         box = self._cal_boxes.get("inventory")
@@ -478,6 +484,23 @@ class OverlayWindow(QMainWindow):
             box.setProperty("state", "pending")
         box.style().unpolish(box); box.style().polish(box)
         self._update_start_enabled()
+
+    def set_roi_status(self, ok: bool, roi_text: Optional[str] = None) -> None:
+        box = self._cal_boxes.get("roi")
+        if not box:
+            return
+        if ok:
+            box.setText("[ Set ]")
+            box.setToolTip(roi_text or "")
+            box.setProperty("state", "done")
+        else:
+            box.setText(self.NONE_DISPLAY)
+            box.setToolTip("")
+            box.setProperty("state", "pending")
+        try:
+            box.style().unpolish(box); box.style().polish(box)
+        except Exception:
+            pass
 
     # ------ Compatibility API used by HotkeyManager ------
     def set_status(self, text: str) -> None:

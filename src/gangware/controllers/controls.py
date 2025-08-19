@@ -2,49 +2,190 @@
 Handles all input automation tasks.
 """
 
+import sys
+import logging
 import pydirectinput
+
+try:  # Windows-specific for XBUTTON support
+    import ctypes  # type: ignore
+    _user32 = ctypes.windll.user32 if sys.platform == "win32" else None
+except Exception:  # pragma: no cover - platform dependent
+    _user32 = None
 
 
 class InputController:
     """Main class for mouse, keyboard, and input automation."""
 
     def __init__(self):
-        # Initialization if needed
-        pass
+        # Configure pydirectinput for immediate actions and no edge failsafe
+        try:
+            import pydirectinput as _pdi
+            _pdi.FAILSAFE = False
+            _pdi.PAUSE = 0.0
+        except Exception:
+            pass
+
+    # ---- internal helpers to keep cognitive complexity low ----
+    @staticmethod
+    def _sleep(seconds: float) -> None:
+        try:
+            import time as _t
+            if seconds > 0:
+                _t.sleep(seconds)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _near(a: int, b: int, tol: int = 2) -> bool:
+        try:
+            return abs(int(a) - int(b)) <= int(tol)
+        except Exception:
+            return False
+
+    @staticmethod
+    def _get_mouse_pos() -> tuple[int | None, int | None]:
+        try:
+            pos = pydirectinput.position()
+            return int(pos[0]), int(pos[1])
+        except Exception:
+            return None, None
+
+    @staticmethod
+    def _set_cursor_win32(x: int, y: int) -> bool:
+        if _user32 is None:
+            return False
+        try:
+            _user32.SetCursorPos(int(x), int(y))
+            return True
+        except Exception:
+            return False
+
+    def _ensure_position(self, x: int, y: int, tol: int = 2) -> bool:
+        """Verify cursor is near (x,y); if not, try Win32 SetCursorPos once and re-check."""
+        logger = logging.getLogger(__name__)
+        cx, cy = self._get_mouse_pos()
+        if cx is not None and cy is not None and self._near(cx, x, tol) and self._near(cy, y, tol):
+            logger.debug("mouse: moved to (%d,%d)", x, y)
+            return True
+        if self._set_cursor_win32(x, y):
+            self._sleep(0.01)
+            cx, cy = self._get_mouse_pos()
+            logger.info("mouse: fallback SetCursorPos to (%d,%d); now at (%s,%s)", x, y, str(cx), str(cy))
+            return cx is not None and cy is not None and self._near(cx, x, tol) and self._near(cy, y, tol)
+        logger.warning("mouse: moveTo did not reach target (%d,%d); current=%s", x, y, str((cx, cy)))
+        return False
 
     def move_mouse(self, x, y):
         """
-        Moves mouse to (x, y).
+        Moves mouse to (x, y) with verification and minimal branching.
         """
-        pydirectinput.moveTo(x, y)
+        logger = logging.getLogger(__name__)
+        try:
+            xi, yi = int(x), int(y)
+        except Exception:
+            xi, yi = x, y
+        try:
+            pydirectinput.moveTo(xi, yi)
+        except Exception as e:
+            logger.exception("mouse: moveTo failed: %s", e)
+            # Best-effort fallback
+            self._set_cursor_win32(xi, yi)
+            return
+        self._sleep(0.002)  # Reduced from 20ms to 2ms for speed
+        self._ensure_position(xi, yi, tol=2)
 
     def click(self):
         """
-        Performs a left mouse click.
+        Performs a left mouse click with robust fallback.
         """
-        pydirectinput.click(button='left')
+        # Reuse the robust click_button path for consistency
+        try:
+            self.click_button('left', presses=1, interval=0.0)
+        except Exception:
+            try:
+                pydirectinput.click(button='left')
+            except Exception:
+                pass
 
     def click_button(self, button: str, presses: int = 1, interval: float = 0.05):
-        """Click a specific mouse button one or more times.
+        """Click a specific mouse button one or more times with low branching.
 
         Args:
-            button: 'left', 'right', or 'middle'. Other values (e.g., 'xbutton1')
-                    are attempted but may not be supported by pydirectinput.
+            button: 'left', 'right', 'middle', or extended ('xbutton1'/'xbutton2').
             presses: Number of clicks.
             interval: Delay between clicks.
         """
+        btn = (button or "").lower()
+
+        def _loop(n: int, fn):
+            for _ in range(max(1, int(n))):
+                try:
+                    fn()
+                except Exception:
+                    # continue to next attempt
+                    pass
+                if interval and interval > 0:
+                    self._sleep(interval)
+
+        def _click_win32_xbutton() -> bool:
+            if sys.platform != "win32" or _user32 is None or btn not in ("xbutton1", "xbutton2"):
+                return False
+            MOUSEEVENTF_XDOWN = 0x0080
+            MOUSEEVENTF_XUP = 0x0100
+            XBUTTON1 = 0x0001
+            XBUTTON2 = 0x0002
+            data = XBUTTON1 if btn == "xbutton1" else XBUTTON2
+            try:
+                _loop(presses, lambda: (_user32.mouse_event(MOUSEEVENTF_XDOWN, 0, 0, data, 0),
+                                        _user32.mouse_event(MOUSEEVENTF_XUP, 0, 0, data, 0)))
+                return True
+            except Exception:
+                return False
+
+        def _click_win32_standard() -> bool:
+            if sys.platform != "win32" or _user32 is None or btn not in ("left", "right", "middle"):
+                return False
+            flags_map = {
+                "left": (0x0002, 0x0004),    # MOUSEEVENTF_LEFTDOWN/UP
+                "right": (0x0008, 0x0010),   # MOUSEEVENTF_RIGHTDOWN/UP
+                "middle": (0x0020, 0x0040),  # MOUSEEVENTF_MIDDLEDOWN/UP
+            }
+            down_flag, up_flag = flags_map.get(btn, (None, None))
+            if down_flag is None:
+                return False
+            try:
+                _loop(presses, lambda: (_user32.mouse_event(down_flag, 0, 0, 0, 0),
+                                        _user32.mouse_event(up_flag, 0, 0, 0, 0)))
+                return True
+            except Exception:
+                return False
+
+        def _click_pdi_specific() -> bool:
+            try:
+                pydirectinput.click(button=btn or 'left', clicks=presses, interval=interval)
+                return True
+            except Exception:
+                return False
+
+        def _fallback_left() -> None:
+            _loop(presses, lambda: pydirectinput.click(button='left'))
+
+        # Try in order: extended buttons via Win32, standard L/R/M via Win32, PDI-specific, then fallback left
+        if _click_win32_xbutton():
+            return
+        if _click_win32_standard():
+            return
+        if _click_pdi_specific():
+            return
+        # Last resort: attempt left-click via PDI (and native left if PDI fails inside loop)
         try:
-            pydirectinput.click(button=button, clicks=presses, interval=interval)
+            _fallback_left()
         except Exception:
-            # Fallback: attempt default click if unsupported
-            for _ in range(max(1, presses)):
-                pydirectinput.click(button='left')
-                if interval > 0:
-                    try:
-                        import time as _t
-                        _t.sleep(interval)
-                    except Exception:
-                        pass
+            if sys.platform == "win32" and _user32 is not None:
+                try:
+                    _loop(presses, lambda: (_user32.mouse_event(0x0002, 0, 0, 0, 0), _user32.mouse_event(0x0004, 0, 0, 0, 0)))
+                except Exception:
+                    pass
 
     def mouse_down(self, button: str = 'left'):
         """Press and hold a mouse button (left/right/middle)."""
@@ -54,11 +195,73 @@ class InputController:
         """Release a previously held mouse button (left/right/middle)."""
         pydirectinput.mouseUp(button=button)
 
-    def type_text(self, text):
+    def type_text(self, text: str, interval: float = 0.02, pre_delay: float = 0.03):
         """
-        Types the given text.
+        Types the given text with an optional per-character interval and a small
+        stabilization delay before typing to avoid dropped leading keystrokes.
         """
-        pydirectinput.write(text)
+        try:
+            if pre_delay and pre_delay > 0:
+                import time as _t
+                _t.sleep(pre_delay)
+        except Exception:
+            pass
+        try:
+            pydirectinput.write(text, interval=max(0.0, float(interval)))
+        except Exception:
+            # Fallback: type character by character
+            try:
+                for ch in str(text):
+                    pydirectinput.write(ch)
+                    if interval and interval > 0:
+                        import time as _t
+                        _t.sleep(interval)
+            except Exception:
+                pass
+
+    def type_text_precise(self, text: str, interval: float = 0.02, pre_delay: float = 0.05):
+        """
+        Type text character-by-character with explicit Shift handling for uppercase letters.
+        Adds a small stabilization delay before typing and a per-character delay to avoid
+        the first characters being dropped by some games.
+        """
+        try:
+            if pre_delay and pre_delay > 0:
+                import time as _t
+                _t.sleep(pre_delay)
+        except Exception:
+            pass
+        try:
+            for ch in str(text):
+                try:
+                    if ch == ' ':
+                        pydirectinput.press('space')
+                    elif ch.isalpha():
+                        name = ch.lower()
+                        if ch.isupper():
+                            try:
+                                pydirectinput.keyDown('shift')
+                                pydirectinput.press(name)
+                            finally:
+                                pydirectinput.keyUp('shift')
+                        else:
+                            pydirectinput.press(name)
+                    else:
+                        # Fallback: write raw character
+                        pydirectinput.write(ch)
+                except Exception:
+                    try:
+                        pydirectinput.write(ch)
+                    except Exception:
+                        pass
+                if interval and interval > 0:
+                    try:
+                        import time as _t
+                        _t.sleep(interval)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
 
     def press_key(self, key: str, presses: int = 1, interval: float = 0.05):
         """Press a key one or more times with an optional interval between presses.
@@ -70,3 +273,31 @@ class InputController:
         """
         # pydirectinput mirrors PyAutoGUI's API and supports press with repeats.
         pydirectinput.press(key, presses=presses, interval=interval)
+
+    def hotkey(self, *keys: str):
+        """Press a chorded hotkey like Ctrl+A using pydirectinput.hotkey.
+
+        Example: hotkey('ctrl', 'a')
+        """
+        try:
+            pydirectinput.hotkey(*keys)
+        except Exception:
+            # Best-effort fallback: press keys sequentially
+            for k in keys:
+                try:
+                    pydirectinput.press(k)
+                except Exception:
+                    pass
+
+    # Convenience to press config tokens (e.g., 'key_i', 'mouse_xbutton2')
+    def press_token(self, token: str):
+        t = (token or "").strip().lower()
+        if not t:
+            return
+        if t.startswith("mouse_"):
+            self.click_button(t.split("_", 1)[1])
+        elif t.startswith("key_"):
+            self.press_key(t.split("_", 1)[1])
+        else:
+            # try as a raw key name
+            self.press_key(t)

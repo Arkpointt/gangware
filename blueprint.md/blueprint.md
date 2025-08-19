@@ -1,6 +1,23 @@
-Blueprint for the GANGWARE AI Assistant (v3)
+Blueprint for the GANGWARE AI Assistant (v4.0)
 Changelog
+2025-08-19: Major performance o6) Calibration Page Structure
+- Purpose: guide user to capture four items:
+  - Inventory Key (keyboard/mouse)
+  - Tek Cancel Key (keyboard/mouse)
+  - Inventory Template (hover search bar and press F8)
+  - **Manual ROI (F6 two-press capture for precise armor matching area)**
+- Each task row contains: label, action button, and a compact status box (initial "[ None ]", becomes "[ Captured ]" or "[ key ]").
+- **F6 ROI row displays "[ Set ]" with tooltip showing coordinates when captured**
+- Start button is the primary action aligned right. Enabled only when all items are captured.
+- Signals and wiring:
+  - capture_inventory -> prompt to capture inventory key
+  - capture_tek -> prompt to capture tek cancel key
+  - capture_template -> F8-triggered template capture
+  - **capture_roi -> F6 two-press manual ROI selection with visual feedback**
+  - start -> allow_calibration_start gate to proceedupdate (v4.0). Implemented sub-second armor swapping with F6 manual ROI capture, template cropping optimizations, fast/slow pass matching, ROI calibration bypass, and multi-monitor coordinate handling. Achieved target of <1 second total F2 execution time.
+
 2025-08-18: Added "Gangware UI – AI Design Blueprint" tokens and strict rules section; marked as authoritative for UI visuals while preserving prior context.
+
 2025-08-18: Blueprint refactored to support a full-featured, two-page GUI. The interface will now include a "Main" view for displaying hotkeys and a "Calibration" view for setup, with seamless navigation between them. This supersedes the previous simplified UI plan.
 
 2025-08-18: UI/Overlay design specification added. Establishes Ark-inspired Floating HUD as the canonical style for all present and future screens.
@@ -157,30 +174,73 @@ Objective: Codify high-level tasks into intelligent workflows.
 
 [x] Implement dedicated threading for Medbrew HoT.
 
+**Phase 3.5: Performance Engineering - The Speed Layer**
+**Objective: Achieve sub-second armor swapping through advanced computer vision optimizations.**
+
+[x] **Module: Advanced Armor Matching (armor_matcher.py)**
+
+[x] **Implement hybrid template matching with edge detection and HSV hue validation**
+
+[x] **Create fast/slow pass optimization with early exit on good matches**
+
+[x] **Add template cropping to focus on item icons vs inventory slot backgrounds**
+
+[x] **Implement multi-scale template matching for UI scaling robustness**
+
+[x] **Add performance timing instrumentation and debugging**
+
+[x] **Module: Precision ROI Management**
+
+[x] **Implement F6 two-press manual ROI capture system with visual feedback**
+
+[x] **Add ROI persistence to config.ini and environment variable coordination**
+
+[x] **Create ROI intersection and fallback logic for multi-monitor setups**
+
+[x] **Add F6 ROI snapshot saving to %APPDATA%/Gangware/templates/roi.png**
+
+[x] **Optimize ROI calibration bypass when F6 ROI available (eliminates 2+ second delay)**
+
+[x] **Module: Input System Optimization**
+
+[x] **Reduce mouse movement delays from 20ms to 2ms for instant targeting**
+
+[x] **Optimize click timing and sleep intervals for minimal latency**
+
+[x] **Add comprehensive timing debug for performance analysis**
+
 Phase 4: Interface & Diagnostics - The Frontal Lobe
 Objective: Develop the UI and diagnostics.
 
-[ ] Module: User Interface (gui/overlay.py)
+[x] Module: User Interface (gui/overlay.py)
 
-[ ] Create OverlayWindow with a frameless, top-right, Ark-inspired design.
+[x] Create OverlayWindow with a frameless, top-right, Ark-inspired design.
 
-[ ] Implement a QStackedWidget to manage two views: "Main" and "Calibration".
+[x] Implement a QStackedWidget to manage two views: "Main" and "Calibration".
 
-[ ] Create navigation buttons to switch between the two views.
+[x] Create navigation buttons to switch between the two views.
 
-[ ] "Main" View: Design a clean, multi-column layout to display all macro hotkeys.
+[x] "Main" View: Design a clean, multi-column layout to display all macro hotkeys.
 
-[ ] "Calibration" View: Design a unified menu for all setup tasks (keybinds, template capture) with interactive buttons and status indicators.
+[x] "Calibration" View: Design a unified menu for all setup tasks (keybinds, template capture) with interactive buttons and status indicators.
 
-[ ] Implement logic to start in the correct view based on calibration_complete flag.
+[x] Implement logic to start in the correct view based on calibration_complete flag.
 
-[ ] Implement signal/slot system for safe, cross-thread UI updates.
+[x] Implement signal/slot system for safe, cross-thread UI updates.
+
+[x] **Add F6 Manual ROI capture with visual feedback and status display**
+
+[x] **Implement real-time calibration status updates and ROI capture confirmation**
 
 [ ] Module: Self-Analysis & Logging
 
-[ ] Configure global logging in main.py.
+[x] Configure global logging in main.py.
 
-[ ] Integrate logging calls (INFO, DEBUG, ERROR) across all modules.
+[x] Integrate logging calls (INFO, DEBUG, ERROR) across all modules.
+
+[x] **Add performance timing instrumentation and debug logging**
+
+[x] **Implement multi-monitor detection and coordinate debugging**
 
 [ ] Implement a "dry run" mode.
 

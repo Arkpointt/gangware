@@ -84,8 +84,8 @@ def execute_medbrew_burst(input_controller):
     """
     print("Executing Medbrew Burst macro (0 x5)...")
     try:
-        # Press '0' five times with a short interval. Adjust interval if needed.
-        input_controller.press_key('0', presses=5, interval=0.06)
+        # Press '0' five times with ~200ms between presses for reliability.
+        input_controller.press_key('0', presses=5, interval=0.20)
     except Exception as e:
         print(f"Medbrew Burst error: {e}")
     finally:

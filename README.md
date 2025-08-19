@@ -100,12 +100,25 @@ For maximum performance, capture a custom inventory region:
 - **Template Cropping**: Focuses on item icons vs backgrounds
 - **Smart Scaling**: Reduced calibration scales from 23 to 5 for speed
 - **Fast/Slow Pass**: Early exit optimization for common matches
-- **Mouse Timing**: Optimized from 20ms to 2ms delays
+- **Mouse Timing**: Baseline 2ms movement settle, but ~20ms stabilization before/after focus clicks (e.g., search field) to ensure Ark reliably registers input
 
 ### Multi-Monitor Setup
 - **Automatic Detection**: Per-monitor coordinate logging
 - **Coordinate Translation**: Intelligent region mapping
 - **Fallback Logic**: F6 ROI override when auto-detection fails
+
+### Reliability Guardrails (IMPORTANT)
+- Do not reduce stabilization waits around UI focus clicks below ~15–20 ms. Under-speeding these delays can cause Ark to miss focus/clicks and break macros. Current default: 20 ms before/after focusing the search box in the F2 macro.
+- Keep baseline movement settle minimal (2 ms) for speed; rely on guarded waits only where necessary to ensure focus reliability.
+- Configuration keys relevant to diagnostics and tuning:
+  - slow_task_threshold_ms (default 1000)
+  - health_monitor (True/False; default True)
+  - health_interval_seconds (default 5)
+
+### Diagnostics and Support Bundle
+- Per-session logs at %APPDATA%/Gangware/logs/session-YYYYmmdd_HHMMSS/
+- Includes: gangware.log, heartbeat.log, health.json, environment.json, and artifacts/
+- environment.json captures monitors, game window resolution, and borderless state (if Ark is foreground at startup)
 
 ---
 

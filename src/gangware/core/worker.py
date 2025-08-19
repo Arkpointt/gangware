@@ -5,6 +5,8 @@ Processes tasks from the queue.
 
 
 import threading
+import logging
+import time
 
 
 class Worker(threading.Thread):
@@ -37,19 +39,37 @@ class Worker(threading.Thread):
         """Process a single queue item. Return False to break the loop."""
         try:
             task = self.task_queue.get()
-        except Exception as e:
-            print(f"Worker error: {e}")
+        except Exception:
+            logging.getLogger(__name__).exception("worker: queue get error")
             return True
         if task is None:
             return False
         self._display_task_status(task)
         is_tek_dash = self._is_tek_punch_task(task)
+        label = self._task_label(task)
+        t0 = time.perf_counter()
         try:
             self._before_execute(task, is_tek_dash)
             self._execute_task(task)
         except Exception as e:
+            logging.getLogger(__name__).exception("worker: task execution error for %s", label)
             self._set_status(f"Task error: {e}")
         finally:
+            dur_ms = (time.perf_counter() - t0) * 1000.0
+            try:
+                # Read configurable threshold (default 1000ms)
+                thr_ms = 1000.0
+                try:
+                    v = self.config_manager.get("slow_task_threshold_ms", fallback="1000")
+                    thr_ms = float(v)
+                except Exception:
+                    pass
+                if dur_ms > thr_ms:
+                    logging.getLogger(__name__).warning("worker: slow task %s took %.1fms", label, dur_ms)
+                else:
+                    logging.getLogger(__name__).info("worker: task %s executed in %.1fms", label, dur_ms)
+            except Exception:
+                pass
             self._after_execute(is_tek_dash)
             try:
                 self.task_queue.task_done()
@@ -132,6 +152,25 @@ class Worker(threading.Thread):
         except Exception:
             pass
         return False
+
+    @staticmethod
+    def _task_label(task) -> str:
+        try:
+            if isinstance(task, dict):
+                if 'label' in task:
+                    return str(task['label'])
+                if 'name' in task:
+                    return str(task['name'])
+            if callable(task):
+                tid = getattr(task, '_gw_task_id', None)
+                if tid:
+                    return str(tid)
+                fn = getattr(task, '__name__', None)
+                if fn:
+                    return str(fn)
+            return type(task).__name__
+        except Exception:
+            return "task"
 
     def _display_task_status(self, task):
         try:

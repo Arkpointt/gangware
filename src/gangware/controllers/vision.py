@@ -130,6 +130,7 @@ class VisionController:
         full_scales = [round(0.55 + 0.05 * i, 2) for i in range(23)]  # 0.55..1.65
         fast_scales_n = len(fast_scales)
         slow_scales_n = len(full_scales)
+        fast_only = (os.environ.get("GW_VISION_FAST_ONLY", "0") == "1")
         best_overall = -1.0
         best_overall_region = None
         best_overall_meta = None
@@ -194,44 +195,45 @@ class VisionController:
                 best_overall_region = region
                 best_overall_meta = meta
 
-            # Slow fallback: full scales and all methods
-            t_slow0 = time.perf_counter()
-            slow_score, slow_loc, slow_wh, slow_meta = self._best_match_multi(screenshot_gray, template_gray, full_scales)
-            t_slow1 = time.perf_counter()
-            logger.debug("vision: slow pass best_score=%.3f meta=%s", float(slow_score), str(slow_meta))
-            if slow_score >= confidence and slow_loc is not None and slow_wh is not None:
-                t_width, t_height = slow_wh
-                center_x = int(slow_loc[0] + t_width // 2 + int(region["left"]))
-                center_y = int(slow_loc[1] + t_height // 2 + int(region["top"]))
-                try:
-                    self._last_pos = (center_x, center_y)
-                except Exception:
-                    pass
-                if perf_enabled:
-                    t_call1 = time.perf_counter()
+            # Slow fallback: full scales and all methods (skip if fast-only mode is enabled)
+            if not fast_only:
+                t_slow0 = time.perf_counter()
+                slow_score, slow_loc, slow_wh, slow_meta = self._best_match_multi(screenshot_gray, template_gray, full_scales)
+                t_slow1 = time.perf_counter()
+                logger.debug("vision: slow pass best_score=%.3f meta=%s", float(slow_score), str(slow_meta))
+                if slow_score >= confidence and slow_loc is not None and slow_wh is not None:
+                    t_width, t_height = slow_wh
+                    center_x = int(slow_loc[0] + t_width // 2 + int(region["left"]))
+                    center_y = int(slow_loc[1] + t_height // 2 + int(region["top"]))
                     try:
-                        self._last_perf = {
-                            "total_ms": (t_call1 - t_call0) * 1000.0,
-                            "grab_ms": (t_grab1 - t_grab0) * 1000.0,
-                            "gray_ms": (t_gray1 - t_grab1) * 1000.0,
-                            "fast_ms": (t_fast1 - t_fast0) * 1000.0,
-                            "slow_ms": (t_slow1 - t_slow0) * 1000.0,
-                            "roi_w": int(base_region.get("width", 0)),
-                            "roi_h": int(base_region.get("height", 0)),
-                            "tpl_wh": (int(tpl_w), int(tpl_h)),
-                            "fast_scales_n": int(fast_scales_n),
-                            "slow_scales_n": int(slow_scales_n),
-                            "region": dict(region),
-                            "path": str(template_path),
-                            "phase": "slow",
-                        }
+                        self._last_pos = (center_x, center_y)
                     except Exception:
-                        self._last_perf = {"total_ms": (t_call1 - t_call0) * 1000.0, "phase": "slow"}
-                return center_x, center_y
-            if slow_score > best_overall:
-                best_overall = slow_score
-                best_overall_region = region
-                best_overall_meta = slow_meta
+                        pass
+                    if perf_enabled:
+                        t_call1 = time.perf_counter()
+                        try:
+                            self._last_perf = {
+                                "total_ms": (t_call1 - t_call0) * 1000.0,
+                                "grab_ms": (t_grab1 - t_grab0) * 1000.0,
+                                "gray_ms": (t_gray1 - t_grab1) * 1000.0,
+                                "fast_ms": (t_fast1 - t_fast0) * 1000.0,
+                                "slow_ms": (t_slow1 - t_slow0) * 1000.0,
+                                "roi_w": int(base_region.get("width", 0)),
+                                "roi_h": int(base_region.get("height", 0)),
+                                "tpl_wh": (int(tpl_w), int(tpl_h)),
+                                "fast_scales_n": int(fast_scales_n),
+                                "slow_scales_n": int(slow_scales_n),
+                                "region": dict(region),
+                                "path": str(template_path),
+                                "phase": "slow",
+                            }
+                        except Exception:
+                            self._last_perf = {"total_ms": (t_call1 - t_call0) * 1000.0, "phase": "slow"}
+                    return center_x, center_y
+                if slow_score > best_overall:
+                    best_overall = slow_score
+                    best_overall_region = region
+                    best_overall_meta = slow_meta
         # Save diagnostics for caller
         try:
             self._last_debug = {

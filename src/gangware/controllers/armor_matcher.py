@@ -49,6 +49,15 @@ ALLOWED_NAMES: List[str] = [
     "flak_boots",
 ]
 
+# Filename aliasing for common misspellings or legacy assets
+# Note: These affect only file resolution; the public API names remain ALLOWED_NAMES above.
+NAME_FILE_ALIASES: Dict[str, List[str]] = {
+    # Support alternate synonyms for completeness (if filenames were saved that way)
+    "flak_chestpiece": ["flak_chest"],
+    "flak_gauntlets": ["flak_gloves"],
+    "flak_legs": ["flak_leggings"],
+}
+
 
 @dataclass
 class _Tpl:
@@ -348,6 +357,15 @@ class ArmorMatcher:
         # Only consider allowed tiers to reduce IO and enforce constraints
         variants += [f"{t}_{name_norm}" for t in ALLOWED_TIERS]
 
+        # Include filename aliases (for misspellings or alternate naming)
+        try:
+            aliases = NAME_FILE_ALIASES.get(name_norm, [])
+            for a in aliases:
+                variants.append(a)
+                variants += [f"{t}_{a}" for t in ALLOWED_TIERS]
+        except Exception:
+            pass
+
         seen: set[str] = set()
         results: List[Path] = []
 
@@ -379,5 +397,7 @@ class ArmorMatcher:
         except Exception:
             pass
 
-        self._path_cache[name_norm] = results
+        # Avoid caching empty results so adding files at runtime is detected on next call
+        if results:
+            self._path_cache[name_norm] = results
         return results

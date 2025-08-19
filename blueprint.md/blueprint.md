@@ -234,6 +234,17 @@ Objective: Develop the UI and diagnostics.
 
 [ ] Module: Self-Analysis & Logging
 
+Performance Guardrails (Authoritative)
+- Mouse/UI focus timing: Maintain ~20 ms stabilization before/after focus-critical clicks (e.g., search field) to ensure Ark reliably registers focus. Do NOT lower below ~15 ms without a validated test plan. Baseline movement settle may remain at ~2 ms.
+- Speed vs reliability: Prefer minimal waits everywhere else, but protect UI focus transitions explicitly to avoid regressions.
+- Configurable diagnostics: slow_task_threshold_ms (default 1000), health_monitor (default True), health_interval_seconds (default 5).
+
+Diagnostics & Support Bundle
+- Per-session folder at %APPDATA%/Gangware/logs/session-YYYYmmdd_HHMMSS/
+- Contents: gangware.log, heartbeat.log, health.json, environment.json, artifacts/
+- environment.json includes monitor topology, game window resolution, and borderless state when Ark is foreground at startup.
+- Macro tracing: F2 logs phase timings with correlation IDs (macro=F2 phase=... corr=...).
+
 [x] Configure global logging in main.py.
 
 [x] Integrate logging calls (INFO, DEBUG, ERROR) across all modules.

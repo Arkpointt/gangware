@@ -263,6 +263,118 @@ class InputController:
         except Exception:
             pass
 
+    def paste_text(self, text: str, pre_delay: float = 0.02, settle: float = 0.01):
+        """
+        Paste text into the focused field by setting the clipboard and sending Ctrl+V.
+        Uses the native Win32 clipboard on Windows (thread-safe, COM-independent).
+        Falls back to pyperclip or precise typing if necessary.
+        """
+        ok = False
+
+        # Prefer native Win32 clipboard on Windows to avoid COM threading issues
+        if sys.platform == "win32" and _user32 is not None:
+            try:
+                import ctypes
+                GMEM_MOVEABLE = 0x0002
+                CF_UNICODETEXT = 13
+                data = (str(text) or "") + "\0"
+                raw = data.encode("utf-16-le")
+                # Retry a few times in case the clipboard is busy
+                for _ in range(5):
+                    if _user32.OpenClipboard(None):
+                        try:
+                            _user32.EmptyClipboard()
+                            hglb = ctypes.windll.kernel32.GlobalAlloc(GMEM_MOVEABLE, len(raw))
+                            if hglb:
+                                lp = ctypes.windll.kernel32.GlobalLock(hglb)
+                                if lp:
+                                    ctypes.memmove(lp, raw, len(raw))
+                                    ctypes.windll.kernel32.GlobalUnlock(hglb)
+                                    if _user32.SetClipboardData(CF_UNICODETEXT, hglb):
+                                        ok = True
+                                        hglb = None  # ownership passed to the system
+                        finally:
+                            _user32.CloseClipboard()
+                        if ok:
+                            break
+                    # brief wait and retry
+                    self._sleep(0.01)
+            except Exception:
+                ok = False
+
+        # Fallback to pyperclip if available
+        if not ok:
+            try:
+                import pyperclip  # type: ignore
+                pyperclip.copy(str(text))
+                ok = True
+            except Exception:
+                ok = False
+
+        # Small pre-delay to stabilize focus
+        self._sleep(pre_delay)
+        try:
+            # Inject text as rapid key events (AHK-like SendInput behavior), no Ctrl+V required
+            self.type_text_guarded_fast(str(text), pre_delay=0.0, first_delay=0.035, post_space_delay=0.02, burst_interval=0.0)
+            self._sleep(settle)
+            return
+        except Exception:
+            pass
+
+        # If anything failed, fallback to precise typing (still fast)
+        try:
+            self.type_text_precise(text, interval=0.01, pre_delay=max(0.02, pre_delay))
+        except Exception:
+            pass
+
+    def type_text_guarded_fast(self, text: str, pre_delay: float = 0.03, first_delay: float = 0.035, post_space_delay: float = 0.02, burst_interval: float = 0.0):
+        """
+        Fast text injection tuned for games:
+        - small pre-delay before first char
+        - ensure the first char and the first char after a space get a short delay
+        - otherwise send keys in a tight burst
+        """
+        try:
+            self._sleep(pre_delay)
+            prev_space = True  # treat start like after a space
+            for i, ch in enumerate(str(text)):
+                try:
+                    if ch == ' ':
+                        pydirectinput.press('space')
+                        self._sleep(post_space_delay)
+                        prev_space = True
+                        continue
+                    if ch.isalpha():
+                        name = ch.lower()
+                        if ch.isupper():
+                            try:
+                                pydirectinput.keyDown('shift')
+                                pydirectinput.press(name)
+                            finally:
+                                pydirectinput.keyUp('shift')
+                        else:
+                            pydirectinput.press(name)
+                    elif ch.isdigit():
+                        pydirectinput.press(ch)
+                    else:
+                        # Fallback to write for punctuation/others
+                        pydirectinput.write(ch)
+                except Exception:
+                    try:
+                        pydirectinput.write(ch)
+                    except Exception:
+                        pass
+                # Guarded delays
+                if i == 0:
+                    self._sleep(first_delay)
+                elif prev_space:
+                    self._sleep(post_space_delay)
+                elif burst_interval and burst_interval > 0:
+                    self._sleep(burst_interval)
+                prev_space = (ch == ' ')
+        except Exception:
+            pass
+
     def press_key(self, key: str, presses: int = 1, interval: float = 0.05):
         """Press a key one or more times with an optional interval between presses.
 
@@ -275,19 +387,49 @@ class InputController:
         pydirectinput.press(key, presses=presses, interval=interval)
 
     def hotkey(self, *keys: str):
-        """Press a chorded hotkey like Ctrl+A using pydirectinput.hotkey.
+        """Press a chorded hotkey like Ctrl+A reliably.
 
+        Holds all modifiers down, taps the last key, then releases modifiers in reverse order.
         Example: hotkey('ctrl', 'a')
         """
+        seq = [str(k).lower() for k in keys if k]
+        if not seq:
+            return
         try:
-            pydirectinput.hotkey(*keys)
-        except Exception:
-            # Best-effort fallback: press keys sequentially
-            for k in keys:
+            # Hold modifiers (all but last)
+            for k in seq[:-1]:
                 try:
-                    pydirectinput.press(k)
+                    pydirectinput.keyDown(k)
+                except Exception:
+                    # ignore and continue best-effort
+                    pass
+                self._sleep(0.012)
+            # Tap the last key while modifiers are down
+            try:
+                pydirectinput.press(seq[-1])
+            except Exception:
+                # last-ditch fallback
+                try:
+                    pydirectinput.keyDown(seq[-1])
+                    self._sleep(0.01)
+                    pydirectinput.keyUp(seq[-1])
                 except Exception:
                     pass
+            self._sleep(0.015)
+        except Exception:
+            # If anything above failed unexpectedly, try library hotkey once
+            try:
+                pydirectinput.hotkey(*seq)
+            except Exception:
+                pass
+        finally:
+            # Release modifiers in reverse order
+            for k in reversed(seq[:-1]):
+                try:
+                    pydirectinput.keyUp(k)
+                except Exception:
+                    pass
+                self._sleep(0.006)
 
     # Convenience to press config tokens (e.g., 'key_i', 'mouse_xbutton2')
     def press_token(self, token: str):

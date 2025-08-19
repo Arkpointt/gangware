@@ -11,7 +11,8 @@ from .core.hotkey_manager import HotkeyManager
 from .core.worker import Worker
 from .controllers.vision import VisionController
 from .controllers.controls import InputController
-from .core.logging_setup import setup_logging
+from .core.logging_setup import setup_logging, get_session_dir, get_log_dir
+from .core.health import start_health_monitor
 
 
 def main() -> None:
@@ -26,8 +27,25 @@ def main() -> None:
     app = QApplication.instance() or QApplication([])
 
     config_manager = ConfigManager()
-    # Initialize logging very early
-    setup_logging(config_manager)
+    # Initialize logging very early and store session path for support
+    session_dir = setup_logging(config_manager)
+    try:
+        # Save path to config for easy support reference (not persisted every run)
+        config_manager.config["DEFAULT"]["last_log_session"] = str(session_dir)
+        config_manager.save()
+    except Exception:
+        pass
+
+    # Install a global exception hook to log unhandled exceptions
+    import sys as _sys
+    import logging as _logging
+
+    def _excepthook(exc_type, exc, tb):
+        _logging.getLogger(__name__).exception("Unhandled exception:", exc_info=(exc_type, exc, tb))
+        # Delegate to default hook after logging
+        _sys.__excepthook__(exc_type, exc, tb)
+
+    _sys.excepthook = _excepthook
     state_manager = StateManager()
 
     # Check for calibration and essential settings
@@ -76,6 +94,22 @@ def main() -> None:
         status_callback=overlay,
     )
     worker.start()
+
+    # Health monitoring (lightweight, configurable)
+    try:
+        hm_enabled = config_manager.get("health_monitor", fallback="True")
+        if str(hm_enabled).strip().lower() in ("true", "1", "yes", "on"):
+            interval = float(config_manager.get("health_interval_seconds", fallback="5"))
+            start_health_monitor(
+                config_manager,
+                session_dir,
+                hotkey_manager,
+                worker,
+                task_queue,
+                interval_seconds=interval,
+            )
+    except Exception:
+        pass
 
 
     # Optional UI demo task

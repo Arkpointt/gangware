@@ -368,7 +368,7 @@ class HotkeyManager(threading.Thread):
             hk_f1: self._on_hotkey_f1,
             hk_f7: self._on_hotkey_f7,
             hk_f10: self._maybe_exit_on_f10,
-            hk_f2: lambda: self._handle_macro_hotkey(self._task_search_and_type("Flak Helmet"), "F2"),
+            hk_f2: lambda: self._handle_macro_hotkey(self._task_equip_flak_fullset(), "F2"),
             hk_f3: lambda: self._handle_macro_hotkey(self._task_equip_armor("tek"), "F3"),
             hk_f4: lambda: self._handle_macro_hotkey(self._task_equip_armor("mixed"), "F4"),
             hk_s_q: lambda: self._handle_macro_hotkey(self._task_medbrew_burst(), "Shift+Q"),
@@ -1165,9 +1165,14 @@ class HotkeyManager(threading.Thread):
     # --------------------------- Macro: search and type ----------------------------
     def _task_search_and_type(self, text: str) -> Callable[[object, object], None]:
         def _job(vision_controller, input_controller):
+            import time as _t
+            import random as _rand
+            corr = f"f2-{int(_t.time())}-{_rand.randint(1000,9999)}"
+            logger = logging.getLogger(__name__)
             try:
                 # 1) Open inventory using configured token (keyboard or mouse)
                 inv_token = self._get_token(self.config_manager, 'inventory_key', 'key_i')
+                t_phase = _t.perf_counter()
                 try:
                     if self.overlay:
                         self.overlay.set_status(f"Opening inventory with {self._token_display(inv_token)}...")
@@ -1183,7 +1188,11 @@ class HotkeyManager(threading.Thread):
                     pass
                 # Give the game UI time to open
                 try:
-                    time.sleep(0.35)
+                    time.sleep(0.25)
+                except Exception:
+                    pass
+                try:
+                    logger.info("macro=F2 phase=open_inventory corr=%s duration_ms=%.1f", corr, (_t.perf_counter() - t_phase) * 1000.0)
                 except Exception:
                     pass
 
@@ -1198,8 +1207,7 @@ class HotkeyManager(threading.Thread):
                 _abs_roi_env = os.environ.get('GW_VISION_ROI', '').strip()
                 # Retry a few times to allow UI to settle; press inventory again mid-way if needed
                 coords = None
-                logger = logging.getLogger(__name__)
-                for attempt in range(8):
+                for attempt in range(5):
                     # Gradually relax confidence from 0.70 down to 0.50
                     conf = max(0.50, 0.70 - 0.03 * attempt)
                     try:
@@ -1215,16 +1223,68 @@ class HotkeyManager(threading.Thread):
                                 _prev_abs = os.environ.pop('GW_VISION_ROI', None)
                             except Exception:
                                 _prev_abs = None
+                        # Constrain search to a band above the inventory area (from F6 ROI or existing inventory ROI)
+                        band = None
                         try:
-                            coords = vision_controller.find_template(str(tmpl), confidence=conf)
+                            inv_hint = None
+                            if _abs_roi_env:
+                                parts = [int(p.strip()) for p in _abs_roi_env.split(',')]
+                                if len(parts) == 4:
+                                    inv_hint = { 'left': parts[0], 'top': parts[1], 'width': parts[2], 'height': parts[3] }
+                            if inv_hint is None:
+                                inv0 = getattr(vision_controller, 'inventory_roi', None)
+                                if isinstance(inv0, dict) and inv0.get('width', 0) > 0 and inv0.get('height', 0) > 0:
+                                    inv_hint = inv0
+                            if inv_hint is not None:
+                                L = int(inv_hint.get('left', 0)); T = int(inv_hint.get('top', 0)); W = int(inv_hint.get('width', 0)); H = int(inv_hint.get('height', 0))
+                                band_h = max(100, min(260, int(H * 0.40)))
+                                band_top = max(0, T - band_h - int(H * 0.05))
+                                band_left = max(0, L - int(W * 0.05))
+                                band_w = int(W + int(W * 0.10))
+                                # Clamp to virtual screen
+                                try:
+                                    import mss
+                                    with mss.mss() as sct:
+                                        vb = sct.monitors[0]
+                                        band_left = max(vb['left'], min(band_left, vb['left'] + vb['width'] - band_w))
+                                        band_top = max(vb['top'], min(band_top, vb['top'] + vb['height'] - band_h))
+                                except Exception:
+                                    pass
+                                band = { 'left': int(band_left), 'top': int(band_top), 'width': int(band_w), 'height': int(band_h) }
+                        except Exception:
+                            band = None
+                        prev_manual_roi = getattr(vision_controller, 'search_roi', None)
+                        try:
+                            if band is not None and hasattr(vision_controller, 'set_search_roi'):
+                                vision_controller.set_search_roi(band)
+                            # Force fast-only search to reduce latency for search-bar detection
+                            _prev_fast = os.environ.get('GW_VISION_FAST_ONLY')
+                            try:
+                                os.environ['GW_VISION_FAST_ONLY'] = '1'
+                                coords = vision_controller.find_template(str(tmpl), confidence=conf)
+                            finally:
+                                try:
+                                    if _prev_fast is None:
+                                        os.environ.pop('GW_VISION_FAST_ONLY', None)
+                                    else:
+                                        os.environ['GW_VISION_FAST_ONLY'] = _prev_fast
+                                except Exception:
+                                    pass
                         finally:
+                            try:
+                                if hasattr(vision_controller, 'clear_search_roi'):
+                                    vision_controller.clear_search_roi()
+                                if prev_manual_roi is not None and hasattr(vision_controller, 'set_search_roi'):
+                                    vision_controller.set_search_roi(prev_manual_roi)
+                            except Exception:
+                                pass
                             if _prev_abs is not None:
                                 os.environ['GW_VISION_ROI'] = _prev_abs
                     except Exception as e:
-                        logger.exception("vision.find_template raised on attempt %d: %s", attempt + 1, e)
+                        logger.exception("macro=F2 phase=find_bar corr=%s attempt=%d error=%s", corr, attempt + 1, str(e))
                         coords = None
                     if coords:
-                        logger.info("vision: match on attempt %d at %s (conf>=%.2f)", attempt + 1, str(coords), conf)
+                        logger.info("macro=F2 phase=find_bar corr=%s attempt=%d result=match coords=%s conf>=%.2f", corr, attempt + 1, str(coords), conf)
                         # Log which monitor this detection is on
                         try:
                             import mss
@@ -1242,7 +1302,7 @@ class HotkeyManager(threading.Thread):
                             pass
                         break
                     # On the 4th attempt, try pressing inventory again (some UIs toggle)
-                    if attempt == 3:
+                    if attempt == 2:
                         try:
                             if hasattr(input_controller, 'press_token'):
                                 input_controller.press_token(inv_token)
@@ -1253,9 +1313,13 @@ class HotkeyManager(threading.Thread):
                         except Exception:
                             pass
                     try:
-                        time.sleep(0.15)
+                        time.sleep(0.04)
                     except Exception:
                         pass
+                try:
+                    logger.info("macro=F2 phase=find_bar corr=%s duration_ms=%.1f found=%s", corr, (_t.perf_counter() - t_phase) * 1000.0, bool(coords))
+                except Exception:
+                    pass
                 if not coords:
                     # Report best observed score to help tune capture
                     dbg = None
@@ -1287,8 +1351,8 @@ class HotkeyManager(threading.Thread):
                                 self.overlay.set_visible(False)
                         except Exception:
                             pass
-                    import time as _t
                     # Move cursor and allow a brief frame to render
+                    t_phase = _t.perf_counter()
                     input_controller.move_mouse(*coords)
                     try:
                         _t.sleep(0.02)
@@ -1297,31 +1361,58 @@ class HotkeyManager(threading.Thread):
                     # Click to focus the field
                     input_controller.click_button('left', presses=1, interval=0.0)
                     try:
+                        _t.sleep(0.03)
+                    except Exception:
+                        pass
+                    try:
+                        logger.info("macro=F2 phase=focus_field corr=%s duration_ms=%.1f", corr, (_t.perf_counter() - t_phase) * 1000.0)
+                    except Exception:
+                        pass
+                    # Clear any existing input using a more robust approach
+                    t_phase = _t.perf_counter()
+                    # Use Ctrl+A to select all text, then Delete to clear
+                    input_controller.hotkey('ctrl', 'a')
+                    try:
+                        _t.sleep(0.03)  # allow selection highlight to register
+                    except Exception:
+                        pass
+                    input_controller.press_key('delete')
+                    try:
                         _t.sleep(0.02)
                     except Exception:
                         pass
-                    # Clear any existing input by pressing Backspace repeatedly
                     try:
-                        input_controller.press_key('backspace', presses=10, interval=0.005)
-                    except Exception:
-                        # Fallback: a few more generic backspaces
-                        for _ in range(8):
-                            try:
-                                input_controller.press_key('backspace')
-                            except Exception:
-                                pass
-                    try:
-                        _t.sleep(0.01)
+                        logger.info("macro=F2 phase=clear_field corr=%s duration_ms=%.1f", corr, (_t.perf_counter() - t_phase) * 1000.0)
                     except Exception:
                         pass
-                    # Type the desired term precisely with explicit Shift handling for uppercase
-                    input_controller.type_text_precise(text, interval=0.03, pre_delay=0.08)
+                    # Paste the desired term (fast and reliable), fallback to precise typing if needed
+                    t_phase = _t.perf_counter()
+                    try:
+                        if hasattr(input_controller, 'paste_text'):
+                            input_controller.paste_text(text, pre_delay=0.02, settle=0.01)
+                        else:
+                            input_controller.type_text_precise(text, interval=0.02, pre_delay=0.05)
+                    except Exception:
+                        try:
+                            input_controller.type_text_precise(text, interval=0.02, pre_delay=0.05)
+                        except Exception:
+                            pass
                     try:
                         _t.sleep(0.015)
                     except Exception:
                         pass
                     # Press Enter to apply filter
                     input_controller.press_key('enter')
+                    try:
+                        logger.info("macro=F2 phase=type_and_apply corr=%s duration_ms=%.1f", corr, (_t.perf_counter() - t_phase) * 1000.0)
+                    except Exception:
+                        pass
+
+                    # Give the game a brief moment to apply the filter before scanning
+                    try:
+                        _t.sleep(0.05)
+                    except Exception:
+                        pass
 
                     # ROI calibration from search bar and fast tier-aware item match
                     try:
@@ -1441,7 +1532,7 @@ class HotkeyManager(threading.Thread):
 
                         roi_bgr, roi_region = vision_controller.grab_inventory_bgr()
                         dur_roi = (_t.perf_counter() - start_roi) * 1000.0
-                        logging.getLogger(__name__).info("timing: ROI calibrate+grab = %.1f ms; roi=%dx%d",
+                        logging.getLogger(__name__).info("macro=F2 phase=roi_grab corr=%s duration_ms=%.1f roi=%dx%d", corr,
                                                          dur_roi, int(roi_region.get('width', 0)), int(roi_region.get('height', 0)))
 
                         # Armor matcher (lazy init)
@@ -1453,11 +1544,24 @@ class HotkeyManager(threading.Thread):
                         start_match = _t.perf_counter()
                         match = self._armor_matcher.best_for_name(roi_bgr, name_norm, threshold=0.25, early_exit=True)
                         dur_match = (_t.perf_counter() - start_match) * 1000.0
-                        logging.getLogger(__name__).info("timing: item match = %.1f ms; name=%s; found=%s",
-                                                         dur_match, name_norm, bool(match))
+                        logging.getLogger(__name__).info("macro=F2 phase=match_item corr=%s name=%s duration_ms=%.1f found=%s", corr,
+                                                         name_norm, dur_match, bool(match))
 
                         if match:
                             x, y, _, _, w, h = match
+                            # Capture a small patch before interaction to detect change after equip
+                            try:
+                                _pre_patch = None
+                                try:
+                                    yy0 = max(0, int(y)); xx0 = max(0, int(x))
+                                    yy1 = min(int(y + h), roi_bgr.shape[0])
+                                    xx1 = min(int(x + w), roi_bgr.shape[1])
+                                    if yy1 > yy0 and xx1 > xx0:
+                                        _pre_patch = roi_bgr[yy0:yy1, xx0:xx1].copy()
+                                except Exception:
+                                    _pre_patch = None
+                            except Exception:
+                                _pre_patch = None
                             abs_x = int(roi_region['left']) + int(x) + int(w) // 2
                             abs_y = int(roi_region['top']) + int(y) + int(h) // 2
                             if self.overlay:
@@ -1473,7 +1577,7 @@ class HotkeyManager(threading.Thread):
                             mouse_move_time = (_t.perf_counter() - start_mouse) * 1000.0
 
                             try:
-                                _t.sleep(0.002)  # Reduced from 10ms to 2ms
+                                _t.sleep(0.025)  # small settle after moving mouse
                             except Exception:
                                 pass
 
@@ -1482,17 +1586,71 @@ class HotkeyManager(threading.Thread):
                             click_time = (_t.perf_counter() - start_click) * 1000.0
 
                             try:
-                                _t.sleep(0.001)  # Reduced from 5ms to 1ms
+                                _t.sleep(0.045)  # let the item focus register
                             except Exception:
                                 pass
 
                             start_equip = _t.perf_counter()
+                            # Ensure equip registers: quick double E with tiny gap
                             input_controller.press_key('e', presses=1, interval=0.0)
+                            try:
+                                _t.sleep(0.090)  # slight gap for game to register E
+                            except Exception:
+                                pass
+                            input_controller.press_key('e', presses=1, interval=0.0)
+                            # Small settle after second E before verifying
+                            try:
+                                _t.sleep(0.030)
+                            except Exception:
+                                pass
+
+                            # Intelligent wait: confirm local patch changes (item moved/equipped) before proceeding
+                            try:
+                                changed = False
+                                for _chk in range(6):  # up to ~120ms
+                                    try:
+                                        _t.sleep(0.02)
+                                    except Exception:
+                                        pass
+                                    roi_after, _ = vision_controller.grab_inventory_bgr()
+                                    # Recompute patch bounds (accounting for possible minor shift)
+                                    yy0 = max(0, int(y)); xx0 = max(0, int(x))
+                                    yy1 = min(int(y + h), roi_after.shape[0])
+                                    xx1 = min(int(x + w), roi_after.shape[1])
+                                    if yy1 <= yy0 or xx1 <= xx0:
+                                        changed = True
+                                        break
+                                    _post_patch = roi_after[yy0:yy1, xx0:xx1]
+                                    if _pre_patch is None or _post_patch.size == 0:
+                                        changed = True
+                                        break
+                                    try:
+                                        import cv2 as _cv
+                                        import numpy as _np
+                                        diff = _cv.absdiff(_post_patch, _pre_patch)
+                                        score = float(_np.mean(diff))
+                                        if score >= 3.0:
+                                            changed = True
+                                            break
+                                    except Exception:
+                                        changed = True
+                                        break
+                                # If no change detected, one more click+E to force action
+                                if not changed:
+                                    input_controller.click_button('left', presses=1, interval=0.0)
+                                    try:
+                                        _t.sleep(0.006)
+                                    except Exception:
+                                        pass
+                                    input_controller.press_key('e', presses=1, interval=0.0)
+                            except Exception:
+                                pass
+
                             equip_time = (_t.perf_counter() - start_equip) * 1000.0
 
                             total_interaction = mouse_move_time + 2.0 + click_time + 1.0 + equip_time
-                            logging.getLogger(__name__).info("timing: mouse_move=%.1fms click=%.1fms equip=%.1fms total_interaction=%.1fms",
-                                                             mouse_move_time, click_time, equip_time, total_interaction)
+                            logging.getLogger(__name__).info("macro=F2 phase=click_and_equip corr=%s mouse_ms=%.1f click_ms=%.1f equip_ms=%.1f total_ms=%.1f",
+                                                             corr, mouse_move_time, click_time, equip_time, total_interaction)
                         else:
                             # Include best observed score for visibility
                             best_sc = None
@@ -1502,9 +1660,9 @@ class HotkeyManager(threading.Thread):
                             except Exception:
                                 best_sc = None
                             if best_sc is not None:
-                                logging.getLogger(__name__).info("armor: no match in ROI for %s (best_score=%.3f)", name_norm, float(best_sc))
+                                logging.getLogger(__name__).info("macro=F2 phase=match_item corr=%s name=%s result=no_match best_score=%.3f", corr, name_norm, float(best_sc))
                             else:
-                                logging.getLogger(__name__).info("armor: no match in ROI for %s", name_norm)
+                                logging.getLogger(__name__).info("macro=F2 phase=match_item corr=%s name=%s result=no_match", corr, name_norm)
                     except Exception:
                         pass
                 except Exception:
@@ -1519,6 +1677,275 @@ class HotkeyManager(threading.Thread):
                 pass
         try:
             setattr(_job, '_gw_task_id', 'search_and_type')
+        except Exception:
+            pass
+        return _job
+
+    def _task_equip_flak_fullset(self) -> Callable[[object, object], None]:
+        pieces = [
+            "Flak Helmet",
+            "Flak Chestpiece",
+            "Flak Leggings",
+            "Flak Gauntlets",
+            "Flak Boots",
+        ]
+        def _job(vision_controller, input_controller):
+            import time as _t
+            logger = logging.getLogger(__name__)
+            try:
+                # 1) Open inventory (supports keyboard or mouse token)
+                inv_token = self._get_token(self.config_manager, 'inventory_key', 'key_i')
+                try:
+                    if hasattr(input_controller, 'press_token'):
+                        input_controller.press_token(inv_token)
+                    else:
+                        name = inv_token.split('_', 1)[1] if '_' in inv_token else inv_token
+                        if inv_token.startswith('key_'):
+                            input_controller.press_key(name)
+                except Exception:
+                    pass
+                _t.sleep(0.25)
+
+                # 2) Locate the search bar ONCE (fast scan, band around inventory)
+                tmpl = self.config_manager.get('search_bar_template')
+                if not tmpl:
+                    self._log('Search bar template not set. Use F8 on Calibration page.')
+                    return
+                _abs_roi_env = os.environ.get('GW_VISION_ROI', '').strip()
+                coords = None
+                for attempt in range(5):
+                    conf = max(0.50, 0.70 - 0.03 * attempt)
+                    _prev_abs = None
+                    try:
+                        if _abs_roi_env:
+                            _prev_abs = os.environ.pop('GW_VISION_ROI', None)
+                        # Try a search band above the inventory area to reduce search space
+                        band = None
+                        try:
+                            inv_hint = None
+                            if _abs_roi_env:
+                                parts = [int(p.strip()) for p in _abs_roi_env.split(',')]
+                                if len(parts) == 4:
+                                    inv_hint = { 'left': parts[0], 'top': parts[1], 'width': parts[2], 'height': parts[3] }
+                            if inv_hint is None:
+                                inv0 = getattr(vision_controller, 'inventory_roi', None)
+                                if isinstance(inv0, dict) and inv0.get('width', 0) > 0 and inv0.get('height', 0) > 0:
+                                    inv_hint = inv0
+                            if inv_hint is not None:
+                                L = int(inv_hint.get('left', 0)); T = int(inv_hint.get('top', 0)); W = int(inv_hint.get('width', 0)); H = int(inv_hint.get('height', 0))
+                                band_h = max(100, min(260, int(H * 0.40)))
+                                band_top = max(0, T - band_h - int(H * 0.05))
+                                band_left = max(0, L - int(W * 0.05))
+                                band_w = int(W + int(W * 0.10))
+                                try:
+                                    import mss
+                                    with mss.mss() as sct:
+                                        vb = sct.monitors[0]
+                                        band_left = max(vb['left'], min(band_left, vb['left'] + vb['width'] - band_w))
+                                        band_top = max(vb['top'], min(band_top, vb['top'] + vb['height'] - band_h))
+                                except Exception:
+                                    pass
+                                band = { 'left': int(band_left), 'top': int(band_top), 'width': int(band_w), 'height': int(band_h) }
+                        except Exception:
+                            band = None
+                        prev_manual_roi = getattr(vision_controller, 'search_roi', None)
+                        try:
+                            if band is not None and hasattr(vision_controller, 'set_search_roi'):
+                                vision_controller.set_search_roi(band)
+                            _prev_fast = os.environ.get('GW_VISION_FAST_ONLY')
+                            try:
+                                os.environ['GW_VISION_FAST_ONLY'] = '1'
+                                coords = vision_controller.find_template(str(tmpl), confidence=conf)
+                            finally:
+                                try:
+                                    if _prev_fast is None:
+                                        os.environ.pop('GW_VISION_FAST_ONLY', None)
+                                    else:
+                                        os.environ['GW_VISION_FAST_ONLY'] = _prev_fast
+                                except Exception:
+                                    pass
+                        finally:
+                            try:
+                                if hasattr(vision_controller, 'clear_search_roi'):
+                                    vision_controller.clear_search_roi()
+                                if prev_manual_roi is not None and hasattr(vision_controller, 'set_search_roi'):
+                                    vision_controller.set_search_roi(prev_manual_roi)
+                            except Exception:
+                                pass
+                    finally:
+                        if _prev_abs is not None:
+                            os.environ['GW_VISION_ROI'] = _prev_abs
+                    if coords:
+                        break
+                    if attempt == 2:
+                        try:
+                            if hasattr(input_controller, 'press_token'):
+                                input_controller.press_token(inv_token)
+                            else:
+                                name = inv_token.split('_', 1)[1] if '_' in inv_token else inv_token
+                                if inv_token.startswith('key_'):
+                                    input_controller.press_key(name)
+                        except Exception:
+                            pass
+                    _t.sleep(0.04)
+                if not coords:
+                    self._log('Search bar not found — aborting fullset equip.')
+                    return
+
+                # 3) Determine inventory ROI once (honor F6 absolute ROI if set)
+                inv_roi = None
+                if _abs_roi_env:
+                    try:
+                        parts = [int(p.strip()) for p in _abs_roi_env.split(',')]
+                        if len(parts) == 4:
+                            inv_roi = {
+                                'left': int(parts[0]), 'top': int(parts[1]),
+                                'width': int(parts[2]), 'height': int(parts[3])
+                            }
+                            vision_controller.inventory_roi = inv_roi
+                            logging.getLogger(__name__).info("F6 ROI: using F6 ROI directly for speed (skipping calibration)")
+                    except Exception:
+                        inv_roi = None
+                if inv_roi is None:
+                    try:
+                        inv_roi = vision_controller.calibrate_inventory_roi_from_search(str(tmpl), min_conf=0.65)
+                    except Exception:
+                        inv_roi = None
+                # Compute sub-ROI from F6 ROI intersection if available
+                try:
+                    if _abs_roi_env and isinstance(inv_roi, dict):
+                        parts = [int(p.strip()) for p in _abs_roi_env.split(',')]
+                        if len(parts) == 4:
+                            inv_left = int(inv_roi.get('left', 0)); inv_top = int(inv_roi.get('top', 0))
+                            inv_w = int(inv_roi.get('width', 0)); inv_h = int(inv_roi.get('height', 0))
+                            abs_left, abs_top, abs_w, abs_h = parts
+                            abs_right, abs_bottom = abs_left + abs_w, abs_top + abs_h
+                            inv_right, inv_bottom = inv_left + inv_w, inv_top + inv_h
+                            inter_left, inter_top = max(inv_left, abs_left), max(inv_top, abs_top)
+                            inter_right, inter_bottom = min(inv_right, abs_right), min(inv_bottom, abs_bottom)
+                            if inter_right > inter_left and inter_bottom > inter_top and inv_w > 0 and inv_h > 0:
+                                rl = (inter_left - inv_left) / float(inv_w)
+                                rt = (inter_top - inv_top) / float(inv_h)
+                                rw = (inter_right - inter_left) / float(inv_w)
+                                rh = (inter_bottom - inter_top) / float(inv_h)
+                                os.environ['GW_INV_SUBROI'] = f"{rl:.4f},{rt:.4f},{rw:.4f},{rh:.4f}"
+                            else:
+                                os.environ.pop('GW_INV_SUBROI', None)
+                except Exception:
+                    pass
+
+                # Ensure armor matcher
+                if self._armor_matcher is None:
+                    base_dir = self.config_manager.config_path.parent
+                    self._armor_matcher = ArmorMatcher(assets_dir=Path('assets'), app_templates_dir=base_dir / 'templates')
+
+                # 4) Rapidly filter, click, and equip each piece
+                try:
+                    if self.overlay and hasattr(self.overlay, 'set_visible'):
+                        self.overlay.set_visible(False)
+                except Exception:
+                    pass
+
+                for idx, disp in enumerate(pieces):
+                    try:
+                        # Focus search field
+                        input_controller.move_mouse(*coords)
+                        _t.sleep(0.01)
+                        input_controller.click_button('left', presses=1, interval=0.0)
+                        _t.sleep(0.01)
+                        # Use Ctrl+A to select all text, then Delete to clear
+                        input_controller.hotkey('ctrl', 'a')
+                        _t.sleep(0.03)  # allow selection highlight to register
+                        input_controller.press_key('delete')
+                        _t.sleep(0.02)
+                        # Type/paste the piece name and apply filter
+                        try:
+                            if hasattr(input_controller, 'paste_text'):
+                                input_controller.paste_text(disp, pre_delay=0.01, settle=0.005)
+                            else:
+                                input_controller.type_text_precise(disp, interval=0.01, pre_delay=0.03)
+                        except Exception:
+                            try:
+                                input_controller.type_text_precise(disp, interval=0.01, pre_delay=0.03)
+                            except Exception:
+                                pass
+                        _t.sleep(0.010)
+                        input_controller.press_key('enter')
+                        # Allow the filter UI to update very briefly
+                        _t.sleep(0.060)
+
+                        # Grab inventory ROI and try to match the item quickly
+                        name_norm = str(disp).strip().lower().replace(' ', '_')
+                        roi_bgr, roi_region = vision_controller.grab_inventory_bgr()
+                        match = None
+                        for _try in range(6):  # allow brief UI update windows before giving up
+                            try:
+                                match = self._armor_matcher.best_for_name(roi_bgr, name_norm, threshold=0.25, early_exit=True)
+                            except Exception:
+                                match = None
+                            if match:
+                                break
+                            _t.sleep(0.02)  # allow UI to update
+                            try:
+                                roi_bgr, roi_region = vision_controller.grab_inventory_bgr()
+                            except Exception:
+                                pass
+
+                        if match:
+                            x, y, _, _, w, h = match
+                            abs_x = int(roi_region['left']) + int(x) + int(w) // 2
+                            abs_y = int(roi_region['top']) + int(y) + int(h) // 2
+                            input_controller.move_mouse(abs_x, abs_y)
+                            _t.sleep(0.025)  # small settle after move
+                            input_controller.click_button('left', presses=1, interval=0.0)
+                            _t.sleep(0.045)  # let focus register
+                            # Ensure equip registers: double E with a short gap
+                            input_controller.press_key('e', presses=1, interval=0.0)
+                            _t.sleep(0.090)
+                            input_controller.press_key('e', presses=1, interval=0.0)
+                            # Small settle after second E before moving on
+                            _t.sleep(0.030)
+                            # Quick verify if item is still in the same place; if so, retry click+E once
+                            try:
+                                prev_cx, prev_cy = int(abs_x), int(abs_y)
+                                roi_after, reg_after = vision_controller.grab_inventory_bgr()
+                                m2 = self._armor_matcher.best_for_name(roi_after, name_norm, threshold=0.28, early_exit=True)
+                                if m2:
+                                    x2, y2, _, _, w2, h2 = m2
+                                    cx2 = int(reg_after['left']) + int(x2) + int(w2) // 2
+                                    cy2 = int(reg_after['top']) + int(y2) + int(h2) // 2
+                                    if abs(cx2 - prev_cx) <= 8 and abs(cy2 - prev_cy) <= 8:
+                                        input_controller.click_button('left', presses=1, interval=0.0)
+                                        _t.sleep(0.006)
+                                        input_controller.press_key('e', presses=1, interval=0.0)
+                            except Exception:
+                                pass
+                            _t.sleep(0.020)  # tiny settle between pieces
+                        else:
+                            logger.info("macro=F2 fullset: no match for %s", name_norm)
+                    except Exception as e:
+                        logger.exception("macro=F2 fullset: error on piece %s: %s", str(disp), str(e))
+
+                # Close inventory via Escape to ensure a clean exit from the loop
+                try:
+                    input_controller.press_key('esc')
+                except Exception:
+                    pass
+
+            except Exception as e:
+                try:
+                    logger.exception("macro=F2 fullset: fatal error: %s", str(e))
+                except Exception:
+                    pass
+            finally:
+                try:
+                    if self.overlay and hasattr(self.overlay, 'set_visible'):
+                        self.overlay.set_visible(True)
+                except Exception:
+                    pass
+            # end _job
+        try:
+            setattr(_job, '_gw_task_id', 'equip_flak_fullset')
         except Exception:
             pass
         return _job

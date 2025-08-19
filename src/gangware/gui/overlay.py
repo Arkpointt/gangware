@@ -5,14 +5,13 @@ from typing import Optional
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QMainWindow, QPushButton, QStackedWidget,
-    QGraphicsDropShadowEffect, QFrame, QScrollArea
+    QGraphicsDropShadowEffect, QFrame, QScrollArea, QSizePolicy
 )
-from PyQt6.QtGui import QColor, QGuiApplication
+from PyQt6.QtGui import QColor, QGuiApplication, QFontDatabase, QFont
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject
-from .design_tokens import STATUS_OK
+from .design_tokens import STATUS_OK, UI_SCALE
 
-# Global UI scale (~34% reduction)
-UI_SCALE = 0.66
+# Global UI scale comes from design tokens
 
 
 def spx(n: int) -> int:
@@ -97,8 +96,31 @@ class OverlayWindow(QMainWindow):
         # Header title
         title = QLabel("GANGWARE")
         title.setObjectName("title")
+        title.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         glow(title, self.CYAN, 22, 140)
         root.addWidget(title)
+
+        # Subtitle
+        subtitle = QLabel("Made by Deacon")
+        subtitle.setObjectName("subtitle")
+        subtitle.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        # Ensure full text is visible: no wrap and expand horizontally
+        try:
+            subtitle.setWordWrap(False)
+            subtitle.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        except Exception:
+            pass
+        try:
+            f = subtitle.font()
+            if f.pointSize() > 0:
+                f.setPointSize(max(8, f.pointSize() - 2))
+            else:
+                f = QFont(f.family(), 9)
+            subtitle.setFont(f)
+        except Exception:
+            pass
+        root.addWidget(subtitle)
+
         root.addWidget(self._divider())
 
         # Tabs
@@ -125,6 +147,7 @@ class OverlayWindow(QMainWindow):
         root.addWidget(self._divider())
         self.status_label = QLabel(message or "")
         self.status_label.setObjectName("status")
+        self.status_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         root.addWidget(self.status_label)
 
         # Wire tab switching
@@ -134,6 +157,8 @@ class OverlayWindow(QMainWindow):
         # Default page
         self._switch_tab(1 if calibration_mode else 0)
 
+        # Load bundled fonts so QSS can use Orbitron even if not installed
+        self._load_project_fonts()
         # Styles
         self._styles()
 
@@ -238,13 +263,7 @@ class OverlayWindow(QMainWindow):
                                    lambda: self.signals.capture_template.emit()))
         lay.addWidget(vs)
 
-        # Footer divider only (no Start button)
-        footer = QWidget()
-        fl = QVBoxLayout(footer)
-        fl.setContentsMargins(0, spx(8), 0, 0)
-        fl.addWidget(self._divider())
-        lay.addWidget(footer)
-
+        
         # Make whole calibration page scrollable (safety)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -287,31 +306,43 @@ class OverlayWindow(QMainWindow):
         h = QHBoxLayout(row)
         h.setContentsMargins(0, 0, 0, 0)
         h.setSpacing(spx(8))
+        try:
+            row.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        except Exception:
+            pass
 
         name_lbl = QLabel(label)
         name_lbl.setObjectName("item")
+        try:
+            name_lbl.setWordWrap(True)
+            name_lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        except Exception:
+            pass
 
         btn = QPushButton(btn_text)
         btn.setObjectName("smallBtn")
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
         btn.clicked.connect(on_click)
+        try:
+            btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        except Exception:
+            pass
         glow(btn, self.CYAN, 20, 100)
 
         box = QLabel(self.NONE_DISPLAY)
         box.setObjectName("statusBox")
         box.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        box.setMinimumWidth(spx(120))
+        box.setFixedWidth(spx(120))
         box.setFixedHeight(spx(36))
         box.setProperty("state", "pending")
         box.style().unpolish(box); box.style().polish(box)
 
         self._cal_boxes[key] = box
 
-        h.addWidget(name_lbl)
-        h.addStretch(1)
-        h.addWidget(btn)
+        h.addWidget(name_lbl, 1)
+        h.addWidget(btn, 0)
         h.addSpacing(spx(8))
-        h.addWidget(box)
+        h.addWidget(box, 0)
         return row
 
     def _nav_button(self, text: str, active: bool):
@@ -337,6 +368,30 @@ class OverlayWindow(QMainWindow):
         line.setFixedHeight(2)
         line.setObjectName("divider")
         return line
+
+    def _load_project_fonts(self) -> None:
+        """
+        Register bundled fonts from assets/fonts (or Assets/Fonts) so that the QSS
+        can use 'Orbitron' regardless of OS installation.
+        """
+        try:
+            base = Path(__file__).resolve().parents[3]
+            candidates = [
+                base / "assets" / "fonts",
+                base / "Assets" / "Fonts",
+            ]
+            font_dir = next((p for p in candidates if p.exists()), None)
+            if not font_dir:
+                return
+            # Add all TTF/OTF fonts in that directory
+            for p in font_dir.iterdir():
+                if p.suffix.lower() in {".ttf", ".otf"}:
+                    try:
+                        QFontDatabase.addApplicationFont(str(p))
+                    except Exception:
+                        pass
+        except Exception:
+            pass
 
     # ------ StyleSheet ------
     def _styles(self):
@@ -401,7 +456,17 @@ class OverlayWindow(QMainWindow):
     # ------ Compatibility API used by HotkeyManager ------
     def set_status(self, text: str) -> None:
         try:
-            self.status_label.setText(text or "")
+            t = text or ""
+            if "calibration complete" in t.lower():
+                t = "STATUS: OPERATIONAL"
+                try:
+                    self.status_label.setProperty("variant", "operational")
+                    self.status_label.style().unpolish(self.status_label)
+                    self.status_label.style().polish(self.status_label)
+                except Exception:
+                    pass
+            self.status_label.setText(t)
+            self.status_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         except Exception:
             pass
 

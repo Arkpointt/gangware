@@ -2,6 +2,16 @@
 Do not change values here without updating the blueprint and tests.
 """
 
+# Global scale (0.66 ≈ 34% reduction). All px tokens derive from BASE * UI_SCALE
+UI_SCALE = 0.66
+
+# Helper (module-internal)
+def _spx(n: float) -> int:
+    try:
+        return int(round(float(n) * UI_SCALE))
+    except Exception:
+        return int(n)
+
 # Colors
 CYAN = "#00DDFF"
 ORANGE = "#FFB800"
@@ -17,24 +27,44 @@ KEYCAP_BORDER = "rgba(0,221,255,0.45)"
 STATUSBOX_BG = "rgba(15,30,45,0.90)"
 STATUSBOX_BORDER = "rgba(255,255,255,0.20)"
 
-# Radii (pixels)
-RADIUS_CARD = 14
-RADIUS_SECTION = 10
-RADIUS_KEYCAP = 10
-RADIUS_TAB = 8
-RADIUS_PRIMARY = 10
+# Radii (BASE -> scaled px)
+RADIUS_CARD_BASE = 14
+RADIUS_SECTION_BASE = 10
+RADIUS_KEYCAP_BASE = 10
+RADIUS_TAB_BASE = 8
+RADIUS_PRIMARY_BASE = 10
+
+RADIUS_CARD = _spx(RADIUS_CARD_BASE)
+RADIUS_SECTION = _spx(RADIUS_SECTION_BASE)
+RADIUS_KEYCAP = _spx(RADIUS_KEYCAP_BASE)
+RADIUS_TAB = _spx(RADIUS_TAB_BASE)
+RADIUS_PRIMARY = _spx(RADIUS_PRIMARY_BASE)
 
 # Fonts
 FONT_STACK = "'Orbitron', 'Segoe UI', Arial, sans-serif"
-TITLE_SIZE = 34
-SECTION_SIZE = 18
-FONT_SIZE = 11  # slightly larger to match 0.66 scale
+TITLE_SIZE_BASE = 52
+SECTION_SIZE_BASE = 27
+SUBTITLE_SIZE_BASE = 15
+FONT_SIZE_BASE = 17
 
-# Spacing & sizes (scaled ~0.6)
-TAB_MIN_HEIGHT = 26  # was 40
-TAB_PADDING_Y = 6    # was 8
-TAB_PADDING_X = 11   # was 16
-KEYCAP_PADDING_Y = 5 # was 6
-KEYCAP_PADDING_X = 9 # was 12
-SMALLBTN_PADDING_Y = 5  # was 6
-SMALLBTN_PADDING_X = 9  # was 12
+TITLE_SIZE = _spx(TITLE_SIZE_BASE)
+SECTION_SIZE = _spx(SECTION_SIZE_BASE)
+SUBTITLE_SIZE = _spx(SUBTITLE_SIZE_BASE)
+FONT_SIZE = _spx(FONT_SIZE_BASE)  # body font size
+
+# Spacing & sizes (BASE -> scaled px)
+TAB_MIN_HEIGHT_BASE = 40
+TAB_PADDING_Y_BASE = 8
+TAB_PADDING_X_BASE = 16
+KEYCAP_PADDING_Y_BASE = 6
+KEYCAP_PADDING_X_BASE = 12
+SMALLBTN_PADDING_Y_BASE = 6
+SMALLBTN_PADDING_X_BASE = 12
+
+TAB_MIN_HEIGHT = _spx(TAB_MIN_HEIGHT_BASE)
+TAB_PADDING_Y = _spx(TAB_PADDING_Y_BASE)
+TAB_PADDING_X = _spx(TAB_PADDING_X_BASE)
+KEYCAP_PADDING_Y = _spx(KEYCAP_PADDING_Y_BASE)
+KEYCAP_PADDING_X = _spx(KEYCAP_PADDING_X_BASE)
+SMALLBTN_PADDING_Y = _spx(SMALLBTN_PADDING_Y_BASE)
+SMALLBTN_PADDING_X = _spx(SMALLBTN_PADDING_X_BASE)

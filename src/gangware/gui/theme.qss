@@ -9,7 +9,7 @@ QWidget {
 #card {
   background-color: rgba(10,20,30,0.85);
   border: 1px solid rgba(0,221,255,0.40);
-  border-radius: 14px;
+  border-radius: 9px;
 }
 
 #title {
@@ -18,6 +18,11 @@ QWidget {
   letter-spacing: 6px;
   color: #00DDFF;
   padding-top: 2px;
+}
+#subtitle {
+  font-size: 10px;
+  color: #D5DCE3;
+  letter-spacing: 1px;
 }
 
 #divider {
@@ -28,10 +33,10 @@ QWidget {
 #tab {
   font-weight: 700;
   color: #ffffff;
-  border-radius: 8px;
+  border-radius: 5px;
   border: 1px solid rgba(0,221,255,0.40);
   background-color: rgba(0,221,255,0.16);
-  padding: 6px 11px;
+  padding: 5px 11px;
   min-height: 26px;
 }
 #tab:hover { background-color: rgba(0,221,255,0.28); }
@@ -43,7 +48,7 @@ QWidget {
 #section {
   background: rgba(18,28,40,0.60);
   border: 1px solid rgba(0,221,255,0.28);
-  border-radius: 10px;
+  border-radius: 7px;
 }
 #sectionTitle {
   color: #FFB800;
@@ -61,17 +66,18 @@ QWidget {
   font-weight: 800;
   background-color: rgba(15,30,45,0.92);
   border: 2px solid rgba(0,221,255,0.45);
-  border-radius: 10px;
-  padding: 5px 9px;
+  border-radius: 7px;
+  padding: 4px 8px;
 }
 
+/* Small button uses the same spec as keycap for unified badges */
 #smallBtn {
   font-weight: 800;
   color: #FFFFFF;
-  background-color: rgba(0,221,255,0.12);
-  border: 1px solid rgba(0,221,255,0.40);
-  border-radius: 8px;
-  padding: 5px 9px;
+  background-color: rgba(15,30,45,0.92);
+  border: 2px solid rgba(0,221,255,0.45);
+  border-radius: 7px;
+  padding: 4px 8px;
 }
 #smallBtn:hover { background-color: rgba(0,221,255,0.28); }
 
@@ -97,3 +103,6 @@ QWidget {
 #status { color: #7FE6FF; letter-spacing: 2px; }
 #calTitle { color: #FFB800; font-size: 18px; font-weight: 800; }
 #hint { color: #D5DCE3; }
+
+/* Optional operational variant for green status */
+#status[variant="operational"] { color: #31F37A; }

@@ -19,6 +19,11 @@ QWidget {
   color: {{ CYAN }};
   padding-top: 2px;
 }
+#subtitle {
+  font-size: {{ SUBTITLE_SIZE }}px;
+  color: {{ TEXT_DEFAULT }};
+  letter-spacing: 1px;
+}
 
 #divider {
   background: {{ DIVIDER }};
@@ -65,13 +70,14 @@ QWidget {
   padding: {{ KEYCAP_PADDING_Y }}px {{ KEYCAP_PADDING_X }}px;
 }
 
+/* Small button uses the same spec as keycap for unified badges */
 #smallBtn {
   font-weight: 800;
   color: #FFFFFF;
-  background-color: rgba(0,221,255,0.12);
-  border: 1px solid {{ BORDER_CYAN }};
-  border-radius: 8px;
-  padding: {{ SMALLBTN_PADDING_Y }}px {{ SMALLBTN_PADDING_X }}px;
+  background-color: {{ KEYCAP_BG }};
+  border: 2px solid {{ KEYCAP_BORDER }};
+  border-radius: {{ RADIUS_KEYCAP }}px;
+  padding: {{ KEYCAP_PADDING_Y }}px {{ KEYCAP_PADDING_X }}px;
 }
 #smallBtn:hover { background-color: rgba(0,221,255,0.28); }
 
@@ -97,3 +103,6 @@ QWidget {
 #status { color: #7FE6FF; letter-spacing: 2px; }
 #calTitle { color: {{ ORANGE }}; font-size: {{ SECTION_SIZE }}px; font-weight: 800; }
 #hint { color: {{ TEXT_DEFAULT }}; }
+
+/* Optional operational variant for green status */
+#status[variant="operational"] { color: {{ STATUS_OK }}; }

@@ -5,14 +5,30 @@ Initializes managers, controllers, threads, and launches the GUI overlay.
 """
 
 import queue
-from .core.config import ConfigManager
-from .core.state import StateManager
-from .core.hotkey_manager import HotkeyManager
-from .core.worker import Worker
-from .controllers.vision import VisionController
-from .controllers.controls import InputController
-from .core.logging_setup import setup_logging, get_session_dir, get_log_dir
-from .core.health import start_health_monitor
+import sys
+import os
+
+# Add the src directory to the Python path for proper imports
+if getattr(sys, 'frozen', False):
+    # Running as executable
+    application_path = os.path.dirname(sys.executable)
+    src_path = os.path.join(application_path, 'src')
+else:
+    # Running as script
+    application_path = os.path.dirname(os.path.abspath(__file__))
+    src_path = os.path.dirname(os.path.dirname(application_path))
+
+if src_path not in sys.path:
+    sys.path.insert(0, src_path)
+
+from gangware.core.config import ConfigManager
+from gangware.core.state import StateManager
+from gangware.core.hotkey_manager import HotkeyManager
+from gangware.core.worker import Worker
+from gangware.controllers.vision import VisionController
+from gangware.controllers.controls import InputController
+from gangware.core.logging_setup import setup_logging
+from gangware.core.health import start_health_monitor
 
 
 def main() -> None:
@@ -56,7 +72,7 @@ def main() -> None:
     missing_settings = [k for k in essential_keys if not config_manager.get(k)]
 
     # Import overlay after QApplication is guaranteed to exist
-    from .gui.overlay import OverlayWindow
+    from gangware.gui.overlay import OverlayWindow
 
     if not calibration_complete or missing_settings:
         reason = []

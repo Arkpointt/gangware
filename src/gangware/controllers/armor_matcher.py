@@ -21,6 +21,7 @@ from typing import Dict, List, Optional, Tuple
 import cv2
 import numpy as np
 import logging
+import sys
 
 # Tier priority (highest to lowest)
 TIER_ORDER: List[str] = [
@@ -97,9 +98,9 @@ def _hue_dist(h1: float, h2: float) -> float:
 
 class ArmorMatcher:
     def __init__(self, assets_dir: Path, app_templates_dir: Optional[Path] = None) -> None:
-        self.assets_dir = Path(assets_dir)
+        self.assets_dir = self._resolve_assets_dir(Path(assets_dir))
         self.app_templates_dir = Path(app_templates_dir) if app_templates_dir else None
-    # name -> tier -> list[_Tpl]
+        # name -> tier -> list[_Tpl]
         self._bank: Dict[str, Dict[str, List[_Tpl]]] = {}
         # name -> tier -> ref hue
         self._tier_ref_hue: Dict[str, Dict[str, float]] = {}
@@ -107,6 +108,21 @@ class ArmorMatcher:
         self._path_cache: Dict[str, List[Path]] = {}
         # last best score per name for debugging
         self._last_best: Dict[str, float] = {}
+
+    def _resolve_assets_dir(self, p: Path) -> Path:
+        """Resolve the assets directory robustly for both dev and frozen executables."""
+        try:
+            if p.is_absolute():
+                return p
+            # When frozen, PyInstaller extracts data files under sys._MEIPASS
+            if getattr(sys, 'frozen', False):
+                base = Path(getattr(sys, '_MEIPASS', Path(sys.executable).parent))
+            else:
+                # Dev mode: prefer current working dir as project root
+                base = Path.cwd()
+            return (base / p).resolve()
+        except Exception:
+            return p
 
     # ---------------------------- public API ----------------------------
     def best_for_name(

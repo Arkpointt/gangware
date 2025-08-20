@@ -425,10 +425,15 @@ class OverlayWindow(QMainWindow):
     # ------ StyleSheet ------
     def _styles(self):
         try:
-            # Build and apply generated QSS from tokens
-            from . import build_theme as theme_builder
-            out_path = theme_builder.build()
-            qss = Path(out_path).read_text(encoding="utf-8")
+            # In a frozen executable, do not attempt to rebuild theme; load the packaged QSS
+            if getattr(sys, 'frozen', False):
+                qss_path = Path(__file__).with_name("theme.qss")
+                qss = qss_path.read_text(encoding="utf-8")
+            else:
+                # Build and apply generated QSS from tokens in dev mode
+                from . import build_theme as theme_builder
+                out_path = theme_builder.build()
+                qss = Path(out_path).read_text(encoding="utf-8")
             self.setStyleSheet(qss)
         except Exception as e:
             # Fallback: leave default styles if build fails

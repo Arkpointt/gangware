@@ -1493,11 +1493,6 @@ class HotkeyManager(threading.Thread):
                 try:
                     if self.overlay:
                         self.overlay.set_status("Clicking search box and typing...")
-                        try:
-                            if hasattr(self.overlay, "set_visible"):
-                                self.overlay.set_visible(False)
-                        except Exception:
-                            pass
                     # Move cursor and allow a brief frame to render
                     t_phase = _t.perf_counter()
                     input_controller.move_mouse(*coords)
@@ -1711,12 +1706,6 @@ class HotkeyManager(threading.Thread):
                                 _pre_patch = None
                             abs_x = int(roi_region['left']) + int(x) + int(w) // 2
                             abs_y = int(roi_region['top']) + int(y) + int(h) // 2
-                            if self.overlay:
-                                try:
-                                    if hasattr(self.overlay, 'set_visible'):
-                                        self.overlay.set_visible(False)
-                                except Exception:
-                                    pass
 
                             # Time the mouse movement and clicking
                             start_mouse = _t.perf_counter()
@@ -1815,11 +1804,7 @@ class HotkeyManager(threading.Thread):
                 except Exception:
                     pass
                 finally:
-                    try:
-                        if self.overlay and hasattr(self.overlay, "set_visible"):
-                            self.overlay.set_visible(True)
-                    except Exception:
-                        pass
+                    pass
             except Exception:
                 pass
         try:
@@ -1996,11 +1981,6 @@ class HotkeyManager(threading.Thread):
                     self._armor_matcher = ArmorMatcher(assets_dir=Path('assets'), app_templates_dir=base_dir / 'templates')
 
                 # 4) Rapidly filter, click, and equip each piece
-                try:
-                    if self.overlay and hasattr(self.overlay, 'set_visible'):
-                        self.overlay.set_visible(False)
-                except Exception:
-                    pass
 
                 for idx, disp in enumerate(pieces):
                     try:
@@ -2094,11 +2074,7 @@ class HotkeyManager(threading.Thread):
                 except Exception:
                     pass
             finally:
-                try:
-                    if self.overlay and hasattr(self.overlay, 'set_visible'):
-                        self.overlay.set_visible(True)
-                except Exception:
-                    pass
+                pass
             # end _job
         try:
             setattr(_job, '_gw_task_id', 'equip_flak_fullset')
@@ -2127,6 +2103,17 @@ class HotkeyManager(threading.Thread):
             import time as _t
             logger = logging.getLogger(__name__)
             try:
+                # 1) Open inventory (supports keyboard or mouse token)
+                inv_token = self._get_token(self.config_manager, 'inventory_key', 'key_i')
+                try:
+                    if hasattr(input_controller, 'press_token'):
+                        input_controller.press_token(inv_token)
+                    else:
+                        name = inv_token.split('_', 1)[1] if '_' in inv_token else inv_token
+                        if inv_token.startswith('key_'):
+                            input_controller.press_key(name)
+                except Exception:
+                    pass
                 # 1) Open inventory (supports keyboard or mouse token)
                 inv_token = self._get_token(self.config_manager, 'inventory_key', 'key_i')
                 try:
@@ -2289,12 +2276,6 @@ class HotkeyManager(threading.Thread):
                     base_dir = self.config_manager.config_path.parent
                     self._armor_matcher = ArmorMatcher(assets_dir=Path('assets'), app_templates_dir=base_dir / 'templates')
 
-                try:
-                    if self.overlay and hasattr(self.overlay, 'set_visible'):
-                        self.overlay.set_visible(False)
-                except Exception:
-                    pass
-
                 for idx, disp in enumerate(pieces):
                     try:
                         # Focus search field
@@ -2381,11 +2362,7 @@ class HotkeyManager(threading.Thread):
                 except Exception:
                     pass
             finally:
-                try:
-                    if self.overlay and hasattr(self.overlay, 'set_visible'):
-                        self.overlay.set_visible(True)
-                except Exception:
-                    pass
+                pass
         try:
             setattr(_job, '_gw_task_id', 'equip_tek_fullset')
         except Exception:
@@ -2417,6 +2394,17 @@ class HotkeyManager(threading.Thread):
             import time as _t
             logger = logging.getLogger(__name__)
             try:
+                # 1) Open inventory (supports keyboard or mouse token)
+                inv_token = self._get_token(self.config_manager, 'inventory_key', 'key_i')
+                try:
+                    if hasattr(input_controller, 'press_token'):
+                        input_controller.press_token(inv_token)
+                    else:
+                        name = inv_token.split('_', 1)[1] if '_' in inv_token else inv_token
+                        if inv_token.startswith('key_'):
+                            input_controller.press_key(name)
+                except Exception:
+                    pass
                 # 1) Open inventory (supports keyboard or mouse token)
                 inv_token = self._get_token(self.config_manager, 'inventory_key', 'key_i')
                 try:
@@ -2578,12 +2566,6 @@ class HotkeyManager(threading.Thread):
                     base_dir = self.config_manager.config_path.parent
                     self._armor_matcher = ArmorMatcher(assets_dir=Path('assets'), app_templates_dir=base_dir / 'templates')
 
-                try:
-                    if self.overlay and hasattr(self.overlay, 'set_visible'):
-                        self.overlay.set_visible(False)
-                except Exception:
-                    pass
-
                 for idx, disp in enumerate(pieces):
                     try:
                         # Focus search field
@@ -2677,11 +2659,7 @@ class HotkeyManager(threading.Thread):
                 except Exception:
                     pass
             finally:
-                try:
-                    if self.overlay and hasattr(self.overlay, 'set_visible'):
-                        self.overlay.set_visible(True)
-                except Exception:
-                    pass
+                pass
             # end _job
         try:
             setattr(_job, '_gw_task_id', 'equip_mixed_fullset')

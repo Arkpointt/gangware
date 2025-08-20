@@ -563,6 +563,13 @@ class OverlayWindow(QMainWindow):
         except Exception:
             pass
 
+    def toggle_visibility(self) -> None:
+        """Toggle overlay visibility between shown and hidden."""
+        try:
+            self.setVisible(not self.isVisible())
+        except Exception:
+            pass
+
     def show_window(self):
         self.show()
         QTimer.singleShot(0, self._anchor_top_right)

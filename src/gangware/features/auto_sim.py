@@ -633,8 +633,9 @@ class AutoSimRunner:
                             else:
                                 prev_roi_for_star = None
 
-                            # Stricter confidence for small icon; keep floor higher to avoid globe highlights
-                            star_conf_levels = (0.62, 0.58, 0.54, 0.50)
+                            # Stricter confidence for small icon; keep floor higher to avoid globe/highlight false positives
+                            # Raised thresholds to be safer when resolution or scaling changes
+                            star_conf_levels = (0.70, 0.66, 0.62, 0.58)
                             # Compute header bottom once for gating
                             header_bottom_for_star = None
                             try:
@@ -659,26 +660,13 @@ class AutoSimRunner:
                                         continue
                                     star_hits += 1
                                     sx, sy = map(int, coords)
-                                    # Star-only short-circuit: if enabled, accept immediately and compute click target from normalized offset
-                                    if getattr(self.cfg, 'star_only_mode', False):
-                                        try:
-                                            # Compute click relative to detected star position for robustness across layouts/scales
-                                            click_x = sx + int(self.cfg.star_to_click_dx_norm * width)
-                                            click_y = sy + int(self.cfg.star_to_click_dy_norm * height)
-                                            # Clamp click target within ROI
-                                            click_x = max(roi_left, min(roi_right - 1, int(click_x)))
-                                            click_y = max(roi_top, min(roi_bottom - 1, int(click_y)))
-                                            detected_server_coords = (int(click_x), int(click_y))
-                                            detected_server_template = sname
-                                            server_content_available = True
-                                            star_found_and_accepted = True
-                                            star_accepts += 1
-                                            self._log_info("server_coords_detected", template=sname, coordinates=detected_server_coords, validation="star_only_mode")
-                                            break
-                                        except Exception:
-                                            pass
-                                    # Header gating - require a detected divider to be present and star below it
+                                    # Header gating - prefer detected divider; fallback to row-band top if divider isn't detected (blur/scale)
                                     header_ok = (header_bottom_for_star is not None and sy > int(header_bottom_for_star))
+                                    # Fallback band-top based gate (mirrors the earlier server_row_band range ~27%+ of height)
+                                    band_top_norm = 0.271  # keep in sync with server_row_band_applied
+                                    band_top_abs = max(roi_top, top + int(height * band_top_norm))
+                                    band_ok = (header_bottom_for_star is None and sy > int(band_top_abs))
+                                    header_or_band_ok = bool(header_ok or band_ok)
                                     # Proximity constraint: must be close to expected position
                                     prox_ok = (abs(sx - exp_x) <= mx and abs(sy - exp_y) <= my)
                                     # Left-edge constraint: use absolute expected band ± small tolerance
@@ -688,8 +676,13 @@ class AutoSimRunner:
                                     self._log_info("star_candidate",
                                                   template=sname, coords=(sx, sy), conf=float(sc),
                                                   header_bottom=int(header_bottom_for_star) if header_bottom_for_star is not None else None,
-                                                  header_ok=bool(header_ok), prox_ok=bool(prox_ok), left_band=f"{left_band_min}-{left_band_max}", left_ok=bool(left_ok))
-                                    if header_ok and prox_ok and left_ok:
+                                                  header_ok=bool(header_ok), band_top=int(band_top_abs), band_ok=bool(band_ok), geom_ok=bool(header_or_band_ok), prox_ok=bool(prox_ok), left_band=f"{left_band_min}-{left_band_max}", left_ok=bool(left_ok))
+                                    # In star-only mode we still require the geometric gates (header or band-top fallback)
+                                    if getattr(self.cfg, 'star_only_mode', False) and not (header_or_band_ok and prox_ok and left_ok):
+                                        reason = "header_and_band_failed" if not header_or_band_ok else ("proximity_failed" if not prox_ok else "left_band_failed")
+                                        self._log_warn("star_coords_rejected", template=sname, coords=(sx, sy), reason=f"star_only_gate_{reason}")
+                                        continue
+                                    if header_or_band_ok and prox_ok and left_ok:
                                         # Quick row confirmation to avoid false positives: check for a row snippet near the star
                                         row_confirmed = False
                                         try:
@@ -727,21 +720,92 @@ class AutoSimRunner:
                                             row_confirmed = False
 
                                         self._log_info("star_row_confirmation", passed=bool(row_confirmed))
+                                        # Secondary verification: if row isn't confirmed or templates are missing,
+                                        # require a second star template to agree within a tiny ROI
+                                        second_ok = False
                                         if not row_confirmed:
-                                            self._log_warn("star_coords_rejected", template=sname, coords=(sx, sy), reason="row_not_confirmed_near_star")
+                                            alt_stars = [t for t in star_templates if t != sname and self.templates.exists(t)]
+                                            if alt_stars:
+                                                verify_pad_x = max(12, int(0.015 * width))
+                                                verify_pad_y = max(12, int(0.020 * height))
+                                                v_left = max(left, sx - verify_pad_x)
+                                                v_right = min(left + width, sx + verify_pad_x)
+                                                v_top = max(top, sy - verify_pad_y)
+                                                v_bottom = min(top + height, sy + verify_pad_y)
+                                                prev_roi_verify = getattr(self.vision, 'search_roi', None)
+                                                try:
+                                                    if hasattr(self.vision, 'set_search_roi') and v_right > v_left and v_bottom > v_top:
+                                                        self.vision.set_search_roi({
+                                                            "left": v_left,
+                                                            "top": v_top,
+                                                            "width": max(1, v_right - v_left),
+                                                            "height": max(1, v_bottom - v_top),
+                                                        })
+                                                    for alt in alt_stars:
+                                                        apath = self.templates.path(alt)
+                                                        if not apath:
+                                                            continue
+                                                        vcoords = self._find(apath, conf=0.68, timeout_s=0.12)
+                                                        if vcoords:
+                                                            ax, ay = map(int, vcoords)
+                                                            if abs(ax - sx) <= verify_pad_x and abs(ay - sy) <= verify_pad_y:
+                                                                second_ok = True
+                                                                break
+                                                finally:
+                                                    try:
+                                                        if prev_roi_verify is not None and hasattr(self.vision, 'set_search_roi'):
+                                                            self.vision.set_search_roi(prev_roi_verify)
+                                                    except Exception:
+                                                        pass
+                                            self._log_info("star_secondary_verify", needed=not row_confirmed, second_ok=bool(second_ok))
+
+                                        accept_this = False
+                                        # In star-only mode, require either row_confirmed (if row templates exist) or second_ok
+                                        if getattr(self.cfg, 'star_only_mode', False):
+                                            any_row_tpl = any(self.templates.exists(rn) for rn in ("click_server", "click_server2", "click_server3", "click_server4", "click_server5"))
+                                            if any_row_tpl:
+                                                accept_this = bool(row_confirmed)
+                                            else:
+                                                accept_this = bool(second_ok)
+                                        else:
+                                            # Non star-only: require row_confirmed
+                                            accept_this = bool(row_confirmed)
+
+                                        if not accept_this:
+                                            reject_reason = "row_not_confirmed_near_star" if not row_confirmed else "secondary_star_verify_failed"
+                                            self._log_warn("star_coords_rejected", template=sname, coords=(sx, sy), reason=reject_reason)
                                             continue
-                                        detected_server_coords = (sx, sy)
-                                        detected_server_template = sname
-                                        server_content_available = True
-                                        star_found_and_accepted = True
-                                        star_accepts += 1
-                                        self._log_info("server_coords_detected",
-                                                       template=sname,
-                                                       coordinates=detected_server_coords,
-                                                       validation="passed_star_header_proximity_left")
-                                        break
+
+                                        # Compute the final click:
+                                        if getattr(self.cfg, 'star_only_mode', False):
+                                            # Derive click from star using normalized offset
+                                            click_x = sx + int(self.cfg.star_to_click_dx_norm * width)
+                                            click_y = sy + int(self.cfg.star_to_click_dy_norm * height)
+                                            click_x = max(roi_left, min(roi_right - 1, int(click_x)))
+                                            click_y = max(roi_top, min(roi_bottom - 1, int(click_y)))
+                                            detected_server_coords = (int(click_x), int(click_y))
+                                            detected_server_template = sname
+                                            server_content_available = True
+                                            star_found_and_accepted = True
+                                            star_accepts += 1
+                                            self._log_info("server_coords_detected",
+                                                           template=sname,
+                                                           coordinates=detected_server_coords,
+                                                           validation="star_only_verified")
+                                            break
+                                        else:
+                                            detected_server_coords = (sx, sy)
+                                            detected_server_template = sname
+                                            server_content_available = True
+                                            star_found_and_accepted = True
+                                            star_accepts += 1
+                                            self._log_info("server_coords_detected",
+                                                           template=sname,
+                                                           coordinates=detected_server_coords,
+                                                           validation="passed_star_geom_proximity_left")
+                                            break
                                     else:
-                                        reason = "header_missing_or_failed" if not header_ok else ("proximity_failed" if not prox_ok else "left_band_failed")
+                                        reason = "geom_failed" if not header_or_band_ok else ("proximity_failed" if not prox_ok else "left_band_failed")
                                         self._log_warn("star_coords_rejected", template=sname, coords=(sx, sy), reason=reason)
 
                             # If we didn't accept any, provide a brief summary for debugging

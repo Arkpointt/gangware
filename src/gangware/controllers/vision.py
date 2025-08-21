@@ -92,8 +92,10 @@ class VisionController:
                     parts = [float(p.strip()) for p in sub_env.split(",")]
                     if len(parts) == 4:
                         rl, rt, rw, rh = [max(0.0, min(1.0, v)) for v in parts]
-                        L = int(roi_override.get("left", 0)); T = int(roi_override.get("top", 0))
-                        W = int(roi_override.get("width", 0)); H = int(roi_override.get("height", 0))
+                        L = int(roi_override.get("left", 0))
+                        T = int(roi_override.get("top", 0))
+                        W = int(roi_override.get("width", 0))
+                        H = int(roi_override.get("height", 0))
                         sub = {
                             "left": L + int(W * rl),
                             "top": T + int(H * rt),
@@ -290,6 +292,226 @@ class VisionController:
         logger.info("vision: no match. best_score=%.3f meta=%s region=%s", float(best_overall), str(best_overall_meta), str(best_overall_region))
         return None
 
+    def find_server_template_enhanced(
+        self, template_path: str, confidence: float = 0.8
+    ) -> Optional[Tuple[int, int]]:
+        """Enhanced server detection with masking and multiscale search.
+
+        Specifically designed for click_server and click_server2 templates to handle:
+        - Different UI scales and resolutions
+        - Dynamic text areas that should be ignored (when supported)
+        - Light preprocessing for better matching
+        - Robust fallback to basic template matching
+
+        Returns absolute screen coordinates (x, y) of the match center when found,
+        otherwise None.
+        """
+        logger = logging.getLogger(__name__)
+        logger.debug("vision: enhanced server detection for %s with confidence=%.3f", template_path, confidence)
+
+        # Establish base region similar to find_template
+        sct = self._get_sct()
+        r0 = _ark_window_region()
+        base_region = r0 if r0 is not None else sct.monitors[0]
+
+        # Optional manual ROI override (env or self.search_roi)
+        env_roi = os.environ.get("GW_VISION_ROI", "").strip()
+        roi_override = None
+        if isinstance(self.search_roi, dict):
+            roi_override = self.search_roi
+        elif env_roi:
+            try:
+                parts = [int(p.strip()) for p in env_roi.split(",")]
+                if len(parts) == 4:
+                    roi_override = {"left": parts[0], "top": parts[1], "width": parts[2], "height": parts[3]}
+            except Exception:
+                roi_override = None
+        if isinstance(roi_override, dict):
+            base_region = {k: int(roi_override[k]) for k in ("left", "top", "width", "height") if k in roi_override}
+
+        regions = [base_region]
+
+        # Load template as grayscale
+        template_gray = cv2.imread(template_path, cv2.IMREAD_GRAYSCALE)
+        if template_gray is None:
+            raise FileNotFoundError(f"Template image not found: {template_path}")
+
+        # Default multiscale range; can be extended downwards dynamically if template doesn't fit
+        scales = [round(0.8 + 0.05 * i, 2) for i in range(9)]  # 0.8..1.2
+        logger.debug("vision: server detection using scales: %s", scales)
+
+        best_score = -1.0
+        best_location: Optional[Tuple[int, int]] = None
+        best_scale: float = 1.0
+        best_region = None
+
+        for region in regions:
+            logger.debug("vision: searching region %s", region)
+            try:
+                grab = np.array(self._safe_grab(region))  # BGRA
+                screenshot_gray = cv2.cvtColor(grab, cv2.COLOR_BGRA2GRAY)
+            except Exception as e:
+                logger.debug("vision: failed to grab region %s: %s", region, e)
+                continue
+
+            # Skip near-black frames (exclusive fullscreen)
+            if float(screenshot_gray.std()) < 1.0:
+                logger.debug("vision: skipping near-black frame")
+                continue
+
+            # Preprocess screenshot once per region
+            try:
+                screenshot_processed = cv2.GaussianBlur(screenshot_gray, (3, 3), 0)
+            except Exception:
+                screenshot_processed = screenshot_gray
+
+            # Ensure the scale list allows the template to fit inside the screenshot
+            try:
+                th0, tw0 = template_gray.shape[:2]
+                sh, sw = screenshot_gray.shape[:2]
+                max_fit_scale = min(sw / max(1, tw0), sh / max(1, th0))
+                if max_fit_scale < scales[0]:
+                    extra = []
+                    s = max(0.4, round(max_fit_scale * 0.95, 2))
+                    while s < scales[0]:
+                        extra.append(round(s, 2))
+                        s = round(s + 0.05, 2)
+                    if extra:
+                        scales = sorted(set(extra + scales))
+                        logger.debug("vision: extended scales to fit: %s", scales)
+            except Exception:
+                pass
+
+            for scale in scales:
+                try:
+                    scaled_template = self._resize_tpl(template_gray, scale)
+                    th, tw = scaled_template.shape[:2]
+                    if th < 8 or tw < 8:
+                        continue
+                    if th > screenshot_processed.shape[0] or tw > screenshot_processed.shape[1]:
+                        continue
+
+                    try:
+                        scaled_template_processed = cv2.GaussianBlur(scaled_template, (3, 3), 0)
+                    except Exception:
+                        scaled_template_processed = scaled_template
+
+                    # Build mask for the scaled template to ignore central text area
+                    try:
+                        base_mask = self._create_server_button_mask((th, tw))
+                        mask = np.ascontiguousarray(base_mask)
+                    except Exception:
+                        mask = None
+
+                    # Use a mask-capable method when possible; fall back to unmasked
+                    try:
+                        if mask is not None:
+                            res = cv2.matchTemplate(
+                                screenshot_processed,
+                                scaled_template_processed,
+                                cv2.TM_CCORR_NORMED,
+                                mask=mask,
+                            )
+                        else:
+                            res = cv2.matchTemplate(
+                                screenshot_processed,
+                                scaled_template_processed,
+                                cv2.TM_CCORR_NORMED,
+                            )
+                        _, max_score, _, max_loc = cv2.minMaxLoc(res)
+                    except Exception as e:
+                        logger.debug("vision: masked match failed at scale %.2f: %s", scale, e)
+                        try:
+                            res = cv2.matchTemplate(
+                                screenshot_gray,
+                                scaled_template,
+                                cv2.TM_CCORR_NORMED,
+                            )
+                            _, max_score, _, max_loc = cv2.minMaxLoc(res)
+                        except Exception as e2:
+                            logger.debug("vision: unmasked fallback failed at scale %.2f: %s", scale, e2)
+                            continue
+
+                    if float(max_score) > best_score:
+                        best_score = float(max_score)
+                        best_location = (int(max_loc[0]), int(max_loc[1]))
+                        best_scale = float(scale)
+                        best_region = region
+                        logger.debug("vision: match at scale %.2f, score=%.3f", scale, best_score)
+                        if best_score >= 0.9:
+                            logger.debug("vision: excellent match found at scale %.2f, score=%.3f", scale, best_score)
+                            break
+                except Exception as e:
+                    logger.debug("vision: error at scale %.2f: %s", scale, e)
+                    continue
+
+            if best_score >= confidence:
+                break
+
+        if best_score >= confidence and best_location is not None and best_region is not None:
+            # Calculate match center in absolute coords
+            scaled_h = int(template_gray.shape[0] * best_scale)
+            scaled_w = int(template_gray.shape[1] * best_scale)
+            center_x = int(best_location[0] + scaled_w // 2 + int(best_region["left"]))
+            center_y = int(best_location[1] + scaled_h // 2 + int(best_region["top"]))
+            logger.info(
+                "vision: enhanced server detection SUCCESS. score=%.3f scale=%.2f pos=(%d,%d)",
+                best_score,
+                best_scale,
+                center_x,
+                center_y,
+            )
+            return center_x, center_y
+
+        logger.info(
+            "vision: enhanced server detection FAILED. best_score=%.3f (required=%.3f)",
+            float(best_score),
+            float(confidence),
+        )
+        return None
+
+    def _create_server_button_mask(self, template_shape: Tuple[int, int]) -> np.ndarray:
+        """Create a mask for server button templates.
+
+        Masks out the center text area where dynamic content appears,
+        focusing on the button borders and background patterns which are more stable.
+
+        Can be configured via environment variables:
+        - GW_SERVER_MASK_LEFT: left margin (default 0.2)
+        - GW_SERVER_MASK_RIGHT: right margin (default 0.8)
+        - GW_SERVER_MASK_TOP: top margin (default 0.3)
+        - GW_SERVER_MASK_BOTTOM: bottom margin (default 0.7)
+        """
+        h, w = template_shape
+        mask = np.ones((h, w), dtype=np.uint8) * 255
+
+        # Get mask parameters from environment or use defaults
+        try:
+            left_pct = float(os.environ.get("GW_SERVER_MASK_LEFT", "0.2"))
+            right_pct = float(os.environ.get("GW_SERVER_MASK_RIGHT", "0.8"))
+            top_pct = float(os.environ.get("GW_SERVER_MASK_TOP", "0.3"))
+            bottom_pct = float(os.environ.get("GW_SERVER_MASK_BOTTOM", "0.7"))
+        except (ValueError, TypeError):
+            # Fallback to defaults if env vars are invalid
+            left_pct, right_pct, top_pct, bottom_pct = 0.2, 0.8, 0.3, 0.7
+
+        # Calculate mask boundaries
+        text_left = int(w * left_pct)
+        text_right = int(w * right_pct)
+        text_top = int(h * top_pct)
+        text_bottom = int(h * bottom_pct)
+
+        # Ensure valid bounds
+        text_left = max(0, min(text_left, w-1))
+        text_right = max(text_left + 1, min(text_right, w))
+        text_top = max(0, min(text_top, h-1))
+        text_bottom = max(text_top + 1, min(text_bottom, h))
+
+        # Set text area to 0 (ignored in matching)
+        mask[text_top:text_bottom, text_left:text_right] = 0
+
+        return mask
+
     # -------------------------- Matching helpers (reduce CC) --------------------------
     @staticmethod
     def _edges(img: np.ndarray) -> np.ndarray:
@@ -317,8 +539,10 @@ class VisionController:
         """Binary mask that keeps the inner area of an item tile (ignores digits/shield)."""
         h, w = shape
         mask = np.zeros((h, w), np.uint8)
-        x0 = int(w * left);  x1 = int(w * (1.0 - right))
-        y0 = int(h * top);   y1 = int(h * (1.0 - bottom))
+        x0 = int(w * left)
+        x1 = int(w * (1.0 - right))
+        y0 = int(h * top)
+        y1 = int(h * (1.0 - bottom))
         if y1 > y0 and x1 > x0:
             mask[y0:y1, x0:x1] = 255
         return mask
@@ -506,8 +730,10 @@ class VisionController:
                     parts = [float(p.strip()) for p in sub_env.split(",")]
                     if len(parts) == 4:
                         rl, rt, rw, rh = [max(0.0, min(1.0, v)) for v in parts]
-                        L = int(roi.get("left", 0)); T = int(roi.get("top", 0))
-                        W = int(roi.get("width", 0)); H = int(roi.get("height", 0))
+                        L = int(roi.get("left", 0))
+                        T = int(roi.get("top", 0))
+                        W = int(roi.get("width", 0))
+                        H = int(roi.get("height", 0))
                         region = {
                             "left": L + int(W * rl),
                             "top": T + int(H * rt),
@@ -573,7 +799,10 @@ class VisionController:
         inv = getattr(self, "inventory_roi", None)
         if not isinstance(inv, dict):
             raise RuntimeError("inventory_roi not set; run calibrate_inventory_roi_from_search first")
-        L = int(inv["left"]); T = int(inv["top"]); W = int(inv["width"]); H = int(inv["height"])
+        L = int(inv["left"])
+        T = int(inv["top"])
+        W = int(inv["width"])
+        H = int(inv["height"])
         rl = max(0.0, min(1.0, float(rel_left)))
         rt = max(0.0, min(1.0, float(rel_top)))
         rw = max(0.0, min(1.0, float(rel_width)))

@@ -51,6 +51,9 @@ from typing import Optional, Dict, Tuple
 import logging
 import random as _rand
 import ctypes
+import mss
+import numpy as np
+import cv2
 
 
 @dataclass
@@ -68,6 +71,23 @@ class SimConfig:
     idle_frames_threshold: int = 30
     backoff_initial: float = 0.05        # Reduced from 0.15 for speed
     backoff_max: float = 0.5             # Reduced from 1.5 for speed
+    # Require seeing the left-side star icon in the server row before accepting any server match
+    require_star_for_server: bool = True
+    # Expected star position (normalized to Ark window) and narrow ROI margins for faster/safer detection
+    star_expected_x_norm: float = 0.085677
+    star_expected_y_norm: float = 0.303241
+    # Tight ROI around expected star — roughly a ~2" box equivalent (half-side ~1") on common DPIs
+    # On 4K (3840x2160), 1" ~96px => ~0.025W, ~0.044H. Tune here if needed.
+    star_roi_margin_x_norm: float = 0.025   # +/- ~2.5% of width around expected x
+    star_roi_margin_y_norm: float = 0.045   # +/- ~4.5% of height around expected y
+    # Star-only mode: treat any valid star hit as "server available" and click based on star offset.
+    # This bypasses header gating and row-template confirmation for a simpler, faster path.
+    star_only_mode: bool = True
+    # Normalized offset from star center to the desired click point on the row (relative to Ark window width/height)
+    # Default derived from current calibrated norms: click_server.x (0.531510) - star.x (~0.085677) ~= 0.445833
+    star_to_click_dx_norm: float = 0.445833
+    # Vertical offset from star to row click; typically near zero. Downward bias is applied later in click stage.
+    star_to_click_dy_norm: float = 0.000000
 
 
 class TemplateLibrary:
@@ -118,6 +138,15 @@ class TemplateLibrary:
             # Server clicking
             "click_server": ("click_server",),
             "click_server2": ("click_server2",),
+            "click_server3": ("click_server3",),
+            "click_server4": ("click_server4",),
+            "click_server5": ("click_server5",),
+            # Row signature icons
+            # Include star_server_click explicitly (tight crop of the star icon) for robustness across backgrounds
+            "server_star": ("server_star", "star_server_click", "star", "row_star", "favorite_star"),
+            "server_star2": ("server_star2", "star2", "row_star2"),
+            "row_star": ("row_star", "star_server_click"),
+            "star_icon": ("star_server_click", "star_icon", "star"),
         }
 
     @staticmethod
@@ -355,6 +384,10 @@ class AutoSimRunner:
             while not self._stop.is_set():
                 self._log_info("main_loop_iteration", current_state=current_state)
 
+                # Initialize server detection variables for each loop iteration
+                detected_server_coords = None
+                detected_server_template = None
+
                 # Adaptive start: skip steps based on detected state
                 skip_to_server_browser = (current_state == "server_browser")
                 skip_to_join_game = (current_state == "join_screen")
@@ -453,8 +486,8 @@ class AutoSimRunner:
                     continue
 
                 # step 4: wait for search results to load and check for servers
-                self._sleep(1.0)  # Wait for search results to populate
-                self._log_info("search_results_wait_complete", message="1 second wait completed, checking for server availability")
+                self._sleep(0.5)  # Wait for search results to populate (reduced from 1.0s)
+                self._log_info("search_results_wait_complete", message="0.5 second wait completed, checking for server availability")
 
                 # Check if we can find any content in the server list area (this indicates servers are available)
                 server_content_available = False
@@ -495,124 +528,346 @@ class AutoSimRunner:
                                     "height": max(1, roi_bottom - roi_top),
                                 })
                             self._log_info("server_roi_applied", left=roi_left, top=roi_top, width=max(1, roi_right - roi_left), height=max(1, roi_bottom - roi_top))
+
+                            # Further refine ROI to the server rows band (exclude header like 'DAY').
+                            # Use normalized expected server Y (~0.301) and keep a safe band below it.
+                            try:
+                                expected_server_y_norm = 0.301389
+                                band_top_norm = max(0.0, expected_server_y_norm - 0.03)   # ~0.271 -> ~586px on 2160p
+                                # Keep a generous band height to include first rows
+                                band_bottom_norm = min(1.0, expected_server_y_norm + 0.25) # ~0.551 -> ~1190px on 2160p
+
+                                row_top = max(roi_top, top + int(height * band_top_norm))
+                                row_bottom = min(roi_bottom, top + int(height * band_bottom_norm))
+
+                                # Only apply if we still have a positive height
+                                if row_bottom > row_top + 10:
+                                    if hasattr(self.vision, 'set_search_roi'):
+                                        self.vision.set_search_roi({
+                                            "left": roi_left,
+                                            "top": row_top,
+                                            "width": max(1, roi_right - roi_left),
+                                            "height": max(1, row_bottom - row_top),
+                                        })
+                                    self._log_info("server_row_band_applied",
+                                        left=roi_left,
+                                        top=row_top,
+                                        width=max(1, roi_right - roi_left),
+                                        height=max(1, row_bottom - row_top)
+                                    )
+                                # Detect header divider line and exclude any detection above it
+                                header_bottom_val = None
+                                try:
+                                    header_bottom_val = self._detect_header_bottom({"left": left, "top": top, "width": width, "height": height}, (roi_left, roi_top, roi_right, roi_bottom))
+                                except Exception:
+                                    header_bottom_val = None
+
+                                if header_bottom_val is not None:
+                                    # Adjust the ROI to start strictly below header_bottom
+                                    new_top = max(row_top if 'row_top' in locals() else roi_top, int(header_bottom_val))
+                                    if new_top < (row_bottom if 'row_bottom' in locals() else roi_bottom) - 5:
+                                        if hasattr(self.vision, 'set_search_roi'):
+                                            self.vision.set_search_roi({
+                                                "left": roi_left,
+                                                "top": new_top,
+                                                "width": max(1, roi_right - roi_left),
+                                                "height": max(1, (row_bottom if 'row_bottom' in locals() else roi_bottom) - new_top),
+                                            })
+                                        self._log_info("header_exclusion_applied", header_bottom=int(header_bottom_val), new_top=int(new_top))
+                            except Exception:
+                                # If any error, continue with the broader server ROI
+                                pass
                         except Exception:
                             pass
 
-                        # Check for absence of servers by looking for click_server templates
-                        # If we can't find click_server or click_server2, then no servers are available
+                        # Primary detection: prefer left star icon cluster (row signature) if templates are provided
                         server_content_available = False  # Default to no servers
+                        star_found_and_accepted = False
+                        # Prepare detection containers early so star pass can feed click stage
+                        detected_server_coords = None
+                        detected_server_template = None
 
-                        self._log_info("checking_server_templates_for_absence", message="Looking for click_server templates to determine server availability")
+                        # Attempt star-icon detection first (more distinctive than header text)
+                        # Prefer the tight star-only crop if available
+                        star_templates = [t for t in ("star_icon", "server_star", "row_star", "server_star2") if self.templates.exists(t)]
+                        if star_templates:
+                            self._log_info("checking_star_templates", templates=star_templates)
+                            # Narrow ROI around expected star position to avoid false candidates elsewhere.
+                            # Use the Ark window bounds for this ROI rather than the broader server list ROI.
+                            exp_x = left + int(self.cfg.star_expected_x_norm * width)
+                            exp_y = top + int(self.cfg.star_expected_y_norm * height)
+                            mx = int(self.cfg.star_roi_margin_x_norm * width)
+                            my = int(self.cfg.star_roi_margin_y_norm * height)
+                            star_left = max(left, exp_x - mx)
+                            star_right = min(left + width, exp_x + mx)
+                            star_top = max(top, exp_y - my)
+                            star_bottom = min(top + height, exp_y + my)
+                            # Ensure a small minimum ROI size to avoid degenerate boxes (at least 16x16)
+                            if star_right - star_left < 16:
+                                pad = (16 - (star_right - star_left)) // 2
+                                star_left = max(left, star_left - pad)
+                                star_right = min(left + width, star_right + pad)
+                            if star_bottom - star_top < 16:
+                                pad = (16 - (star_bottom - star_top)) // 2
+                                star_top = max(top, star_top - pad)
+                                star_bottom = min(top + height, star_bottom + pad)
+                            # Log expected geometry upfront for easier diagnosis
+                            self._log_info(
+                                "star_expected",
+                                window_left=int(left), window_top=int(top), window_w=int(width), window_h=int(height),
+                                exp_x=int(exp_x), exp_y=int(exp_y), margin_x=int(mx), margin_y=int(my)
+                            )
+                            if star_right > star_left and star_bottom > star_top:
+                                prev_roi_for_star = getattr(self.vision, 'search_roi', None)
+                                try:
+                                    if hasattr(self.vision, 'set_search_roi'):
+                                        self.vision.set_search_roi({
+                                            "left": star_left,
+                                            "top": star_top,
+                                            "width": max(1, star_right - star_left),
+                                            "height": max(1, star_bottom - star_top),
+                                        })
+                                    self._log_info("star_roi_applied", left=star_left, top=star_top, width=max(1, star_right - star_left), height=max(1, star_bottom - star_top))
+                                except Exception:
+                                    prev_roi_for_star = None
+                            else:
+                                prev_roi_for_star = None
+
+                            # Stricter confidence for small icon; keep floor higher to avoid globe highlights
+                            star_conf_levels = (0.62, 0.58, 0.54, 0.50)
+                            # Compute header bottom once for gating
+                            header_bottom_for_star = None
+                            try:
+                                header_bottom_for_star = self._detect_header_bottom({"left": left, "top": top, "width": width, "height": height}, (roi_left, roi_top, roi_right, roi_bottom))
+                            except Exception:
+                                header_bottom_for_star = None
+
+                            # Counters for diagnostics
+                            star_attempts = 0
+                            star_hits = 0
+                            star_accepts = 0
+                            for sname in star_templates:
+                                if star_found_and_accepted:
+                                    break
+                                spath = self.templates.path(sname)
+                                if not spath:
+                                    continue
+                                for sc in star_conf_levels:
+                                    star_attempts += 1
+                                    coords = self._find(spath, conf=float(sc), timeout_s=0.30)
+                                    if not coords:
+                                        continue
+                                    star_hits += 1
+                                    sx, sy = map(int, coords)
+                                    # Star-only short-circuit: if enabled, accept immediately and compute click target from normalized offset
+                                    if getattr(self.cfg, 'star_only_mode', False):
+                                        try:
+                                            # Compute click relative to detected star position for robustness across layouts/scales
+                                            click_x = sx + int(self.cfg.star_to_click_dx_norm * width)
+                                            click_y = sy + int(self.cfg.star_to_click_dy_norm * height)
+                                            # Clamp click target within ROI
+                                            click_x = max(roi_left, min(roi_right - 1, int(click_x)))
+                                            click_y = max(roi_top, min(roi_bottom - 1, int(click_y)))
+                                            detected_server_coords = (int(click_x), int(click_y))
+                                            detected_server_template = sname
+                                            server_content_available = True
+                                            star_found_and_accepted = True
+                                            star_accepts += 1
+                                            self._log_info("server_coords_detected", template=sname, coordinates=detected_server_coords, validation="star_only_mode")
+                                            break
+                                        except Exception:
+                                            pass
+                                    # Header gating - require a detected divider to be present and star below it
+                                    header_ok = (header_bottom_for_star is not None and sy > int(header_bottom_for_star))
+                                    # Proximity constraint: must be close to expected position
+                                    prox_ok = (abs(sx - exp_x) <= mx and abs(sy - exp_y) <= my)
+                                    # Left-edge constraint: use absolute expected band ± small tolerance
+                                    left_band_min = left + int(0.06 * width)  # 6%
+                                    left_band_max = left + int(0.13 * width) # 13%
+                                    left_ok = (left_band_min <= sx <= left_band_max)
+                                    self._log_info("star_candidate",
+                                                  template=sname, coords=(sx, sy), conf=float(sc),
+                                                  header_bottom=int(header_bottom_for_star) if header_bottom_for_star is not None else None,
+                                                  header_ok=bool(header_ok), prox_ok=bool(prox_ok), left_band=f"{left_band_min}-{left_band_max}", left_ok=bool(left_ok))
+                                    if header_ok and prox_ok and left_ok:
+                                        # Quick row confirmation to avoid false positives: check for a row snippet near the star
+                                        row_confirmed = False
+                                        try:
+                                            # Define a small ROI to the right of the star, same row band
+                                            confirm_left = max(roi_left, sx + int(0.01 * width))
+                                            confirm_right = min(roi_right, sx + int(0.22 * width))
+                                            confirm_top = max(roi_top, sy - int(0.05 * height))
+                                            confirm_bottom = min(roi_bottom, sy + int(0.06 * height))
+                                            if confirm_right > confirm_left and confirm_bottom > confirm_top and hasattr(self.vision, 'set_search_roi'):
+                                                prev_roi_confirm = getattr(self.vision, 'search_roi', None)
+                                                try:
+                                                    self.vision.set_search_roi({
+                                                        "left": confirm_left,
+                                                        "top": confirm_top,
+                                                        "width": max(1, confirm_right - confirm_left),
+                                                        "height": max(1, confirm_bottom - confirm_top),
+                                                    })
+                                                    # Try available row templates quickly
+                                                    for row_name in ("click_server", "click_server2", "click_server3", "click_server4", "click_server5"):
+                                                        if row_confirmed:
+                                                            break
+                                                        if not self.templates.exists(row_name):
+                                                            continue
+                                                        rpath = self.templates.path(row_name)
+                                                        if rpath and self._find(rpath, conf=0.48, timeout_s=0.15):
+                                                            row_confirmed = True
+                                                            break
+                                                finally:
+                                                    try:
+                                                        if prev_roi_confirm is not None:
+                                                            self.vision.set_search_roi(prev_roi_confirm)
+                                                    except Exception:
+                                                        pass
+                                        except Exception:
+                                            row_confirmed = False
+
+                                        self._log_info("star_row_confirmation", passed=bool(row_confirmed))
+                                        if not row_confirmed:
+                                            self._log_warn("star_coords_rejected", template=sname, coords=(sx, sy), reason="row_not_confirmed_near_star")
+                                            continue
+                                        detected_server_coords = (sx, sy)
+                                        detected_server_template = sname
+                                        server_content_available = True
+                                        star_found_and_accepted = True
+                                        star_accepts += 1
+                                        self._log_info("server_coords_detected",
+                                                       template=sname,
+                                                       coordinates=detected_server_coords,
+                                                       validation="passed_star_header_proximity_left")
+                                        break
+                                    else:
+                                        reason = "header_missing_or_failed" if not header_ok else ("proximity_failed" if not prox_ok else "left_band_failed")
+                                        self._log_warn("star_coords_rejected", template=sname, coords=(sx, sy), reason=reason)
+
+                            # If we didn't accept any, provide a brief summary for debugging
+                            if not star_found_and_accepted:
+                                self._log_info(
+                                    "star_scan_summary",
+                                    attempts=int(star_attempts),
+                                    hits=int(star_hits),
+                                    accepts=int(star_accepts),
+                                    note="Zero accepts; consider increasing margin or lowering confidence if star is visibly present"
+                                )
+
+                            # Restore the previous ROI after star detection pass
+                            try:
+                                if 'prev_roi_for_star' in locals() and isinstance(prev_roi_for_star, dict) and hasattr(self.vision, 'set_search_roi'):
+                                    self.vision.set_search_roi(prev_roi_for_star)
+                                    self._log_info("star_roi_restored")
+                                elif 'prev_roi_for_star' in locals() and prev_roi_for_star is None and hasattr(self.vision, 'set_search_roi'):
+                                    # Restore to rows ROI already applied earlier (do nothing) or clear if needed
+                                    pass
+                            except Exception:
+                                pass
+                        else:
+                            self._log_warn("star_templates_missing", message="No star templates available; star-gated detection may fail if required")
+
+                        # If star not found and not in star-only mode, check row button templates next
+                        if not server_content_available and not getattr(self.cfg, 'star_only_mode', False):
+                            self._log_info("checking_server_templates_for_absence", message="Looking for click_server templates to determine server availability")
 
                         # Progressive confidence levels for different visual conditions
                         # Lower values handle HDR, scaling, color variations, different resolutions
-                        confidence_levels = [0.30, 0.35, 0.40, 0.45]  # Stricter to reduce false positives
+                        # Try stricter confidence first to ensure strong, band-shaped matches (masked template)
+                        confidence_levels = [0.50, 0.45, 0.40]  # can tune if too strict
 
-                        # Check for click_server template first with progressive confidence
-                        if self.templates.exists("click_server"):
-                            self._log_info("checking_click_server_template_absence")
-                            # Get the full path to the template file
-                            click_server_path = self.templates.path("click_server")
-                            if click_server_path:
-                                self._log_info("click_server_path_resolved", path=str(click_server_path))
-                                for confidence in confidence_levels:
-                                    click_result = self.vision.find_template(str(click_server_path), confidence=confidence)
-                                    if click_result:
-                                        # Second-pass verification in a tight ROI around the match at stricter confidence
-                                        try:
-                                            cx, cy = int(click_result[0]), int(click_result[1])
-                                            verify_w, verify_h = 320, 180
-                                            roi_l = max(left, min(cx - verify_w // 2, right - verify_w))
-                                            roi_t = max(top, min(cy - verify_h // 2, bottom - verify_h))
-                                            verify_roi = {"left": roi_l, "top": roi_t, "width": verify_w, "height": verify_h}
-                                            prev_local_roi = getattr(self.vision, 'search_roi', None)
-                                            if hasattr(self.vision, 'set_search_roi'):
-                                                self.vision.set_search_roi(verify_roi)
-                                            recheck_conf = max(0.40, float(confidence))
-                                            recheck = self.vision.find_template(str(click_server_path), confidence=recheck_conf)
-                                            # Restore ROI
-                                            if hasattr(self.vision, 'set_search_roi'):
-                                                if isinstance(prev_local_roi, dict):
-                                                    self.vision.set_search_roi(prev_local_roi)
-                                                elif hasattr(self.vision, 'clear_search_roi'):
-                                                    self.vision.clear_search_roi()
-                                            if recheck:
-                                                server_content_available = True
-                                                self._log_info("click_server_found",
-                                                    message="Found click_server template - servers available",
-                                                    confidence_used=recheck_conf,
-                                                    match_details=click_result,
-                                                    verify_roi=verify_roi,
-                                                    verified=True
-                                                )
-                                                break
-                                            else:
-                                                self._log_info("click_server_verify_failed", initial_confidence=confidence, recheck_confidence=recheck_conf, verify_roi=verify_roi)
-                                                # Continue trying higher confidences
-                                        except Exception as _:
-                                            self._log_info("click_server_verify_error")
-                                            # Treat as not found and continue loop
-                                    else:
-                                        self._log_info("click_server_attempt", confidence=confidence, found=False)
-                            else:
-                                self._log_info("click_server_path_not_resolved", message="Could not resolve click_server template path")
+                        # Consolidated template checks using the helper - store detected coordinates
+                        template_order = ["click_server", "click_server2", "click_server3", "click_server4", "click_server5"]
+                        frame_bounds = (left, top, right, bottom)
+                        # Do not reset detected_server_coords/template here; star pass may have set them already
 
-                            if not server_content_available:
-                                self._log_info("click_server_not_found", message="click_server template not found at any confidence level")
+                        for name in template_order:
+                            if server_content_available:
+                                break
+                            if getattr(self.cfg, 'star_only_mode', False):
+                                # In star-only mode we don't use row templates
+                                break
+                            if not self.templates.exists(name):
+                                continue
+                            # If star is required and we have not validated one, do not accept click_server detections
+                            if self.cfg.require_star_for_server and not star_found_and_accepted:
+                                self._log_warn("skipping_row_detection_without_star", template=name, reason="require_star_for_server is True and star not found/accepted")
+                                continue
+                            coords = self._check_server_template_enhanced(name, tuple(confidence_levels), frame_bounds)
+                            if coords:
+                                # Validate detected coordinates are within expected server list area
+                                x, y = coords
 
-                        # If still no servers found, check click_server2 with same progressive approach
-                        if not server_content_available and self.templates.exists("click_server2"):
-                            self._log_info("checking_click_server2_template_absence")
-                            # Get the full path to the template file
-                            click_server2_path = self.templates.path("click_server2")
-                            if click_server2_path:
-                                self._log_info("click_server2_path_resolved", path=str(click_server2_path))
-                                for confidence in confidence_levels:
-                                    click_result2 = self.vision.find_template(str(click_server2_path), confidence=confidence)
-                                    if click_result2:
-                                        # Second-pass verification in a tight ROI around the match at stricter confidence
-                                        try:
-                                            cx, cy = int(click_result2[0]), int(click_result2[1])
-                                            verify_w, verify_h = 320, 180
-                                            roi_l = max(left, min(cx - verify_w // 2, right - verify_w))
-                                            roi_t = max(top, min(cy - verify_h // 2, bottom - verify_h))
-                                            verify_roi = {"left": roi_l, "top": roi_t, "width": verify_w, "height": verify_h}
-                                            prev_local_roi = getattr(self.vision, 'search_roi', None)
-                                            if hasattr(self.vision, 'set_search_roi'):
-                                                self.vision.set_search_roi(verify_roi)
-                                            recheck_conf = max(0.40, float(confidence))
-                                            recheck = self.vision.find_template(str(click_server2_path), confidence=recheck_conf)
-                                            # Restore ROI
-                                            if hasattr(self.vision, 'set_search_roi'):
-                                                if isinstance(prev_local_roi, dict):
-                                                    self.vision.set_search_roi(prev_local_roi)
-                                                elif hasattr(self.vision, 'clear_search_roi'):
-                                                    self.vision.clear_search_roi()
-                                            if recheck:
-                                                server_content_available = True
-                                                self._log_info("click_server2_found",
-                                                    message="Found click_server2 template - servers available",
-                                                    confidence_used=recheck_conf,
-                                                    match_details=click_result2,
-                                                    verify_roi=verify_roi,
-                                                    verified=True
-                                                )
-                                                break
-                                            else:
-                                                self._log_info("click_server2_verify_failed", initial_confidence=confidence, recheck_confidence=recheck_conf, verify_roi=verify_roi)
-                                        except Exception as _:
-                                            self._log_info("click_server2_verify_error")
-                                    else:
-                                        self._log_info("click_server2_attempt", confidence=confidence, found=False)
-                            else:
-                                self._log_info("click_server2_path_not_resolved", message="Could not resolve click_server2 template path")
+                                # Server list area bounds (from ROI calculations above)
+                                roi_left = left + int(width * 0.4)    # 40% from left
+                                roi_top = top + int(height * 0.15)    # 15% from top
+                                roi_right = right - int(width * 0.05) # 95% from left
+                                roi_bottom = bottom - int(height * 0.15) # 85% from bottom
 
-                            if not server_content_available:
-                                self._log_info("click_server2_not_found", message="click_server2 template not found at any confidence level")
+                                # Header geometry constraint: any detection must be strictly below header_bottom
+                                header_bottom_val2 = None
+                                try:
+                                    header_bottom_val2 = self._detect_header_bottom({"left": left, "top": top, "width": width, "height": height}, (roi_left, roi_top, roi_right, roi_bottom))
+                                except Exception:
+                                    header_bottom_val2 = None
+
+                                header_ok = True
+                                if header_bottom_val2 is not None:
+                                    header_ok = (y > int(header_bottom_val2))
+                                    self._log_info("header_constraint_check", template=name, detected_y=int(y), header_bottom=int(header_bottom_val2), pass_check=bool(header_ok))
+
+                                # Use hardcoded calibrated coordinates as reference for valid server area
+                                # Hardcoded server coords: (0.531510, 0.301389) translates to roughly (2040, 651)
+                                # Allow reasonable margin around these known-good coordinates
+                                expected_server_x = left + int(width * 0.531510)  # ~2040 for 3840 width
+                                expected_server_y = top + int(height * 0.301389)  # ~651 for 2160 height
+
+                                # Define valid area with generous margins around expected server location
+                                margin_x = int(width * 0.15)   # ±15% width margin
+                                margin_y = int(height * 0.10)  # ±10% height margin
+
+                                server_min_x = max(roi_left, expected_server_x - margin_x)
+                                server_max_x = min(roi_right, expected_server_x + margin_x)
+                                server_min_y = max(roi_top, expected_server_y - margin_y)
+                                server_max_y = min(roi_bottom, expected_server_y + margin_y)
+
+                                coords_valid = (server_min_x <= x <= server_max_x and server_min_y <= y <= server_max_y)
+                                if not header_ok:
+                                    coords_valid = False
+
+                                self._log_info("coordinate_validation",
+                                    template=name,
+                                    detected_coords=coords,
+                                    server_area_bounds=f"x:{server_min_x}-{server_max_x}, y:{server_min_y}-{server_max_y}",
+                                    validation_result="valid" if coords_valid else "invalid"
+                                )
+
+                                if coords_valid:
+                                    server_content_available = True
+                                    detected_server_coords = coords
+                                    detected_server_template = name
+                                    self._log_info("server_coords_detected",
+                                        template=name,
+                                        coordinates=coords,
+                                        validation="passed_coordinate_check_and_header_exclusion"
+                                    )
+                                    break
+                                else:
+                                    self._log_warn("server_coords_rejected",
+                                        template=name,
+                                        coordinates=coords,
+                                        reason="coords_out_of_bounds_or_above_header",
+                                        expected_bounds=f"x:{server_min_x}-{server_max_x}, y:{server_min_y}-{server_max_y}",
+                                        message="Enhanced detection found something but coordinates don't match expected server location"
+                                    )
+                                    # Continue to next template
 
                         # Final determination
                         if not server_content_available:
-                            self._log_info("no_server_templates_detected", message="Neither click_server nor click_server2 found - no servers available")
+                            if self.cfg.require_star_for_server and not star_found_and_accepted:
+                                self._log_info("no_server_templates_detected", message="Star not found; skipping row detection because require_star_for_server=True")
+                            else:
+                                self._log_info("no_server_templates_detected", message="No click_server[1..5] templates found - no servers available")
 
                         detection_time = (time.perf_counter() - start_time) * 1000
 
@@ -679,17 +934,45 @@ class AutoSimRunner:
                 if not no_session_found:
                     self._log_info("proceeding_to_server_click", message="Server templates available, clicking server")
 
-                # step 5: click on server in search results (we already know templates exist)
+                # step 5: click on server in search results
                 server_clicked = False
 
-                # Try click_server first (we know it exists from previous check)
-                if self._click_calibrated("click_server"):
-                    self._log_info("server_clicked", method="calibrated", template="click_server")
-                    server_clicked = True
-                # Try click_server2 as alternative (we know it exists from previous check)
-                elif self._click_calibrated("click_server2"):
-                    self._log_info("server_clicked", method="calibrated", template="click_server2")
-                    server_clicked = True
+                # Try using detected coordinates first (most accurate) - but only if they passed validation
+                if detected_server_coords and detected_server_template:
+                    self._log_info("using_detected_server_coords", template=detected_server_template, coords=detected_server_coords)
+                    if self._click_at_detected_coords(detected_server_coords, detected_server_template):
+                        server_clicked = True
+                    else:
+                        self._log_warn("detected_coords_click_failed",
+                            template=detected_server_template,
+                            coords=detected_server_coords,
+                            message="Click at detected coordinates failed - falling back to calibrated coordinates"
+                        )
+
+                # Fallback to calibrated coordinates if detection-based clicking failed or no valid detection
+                if not server_clicked:
+                    if detected_server_coords:
+                        self._log_info("falling_back_to_calibrated_coords", message="Detection-based clicking failed, trying calibrated coordinates")
+                    else:
+                        self._log_info("using_calibrated_coords", message="No valid server coordinates detected, using calibrated coordinates")
+
+                    # Try click_server first (we know it exists from previous check)
+                    if self._click_calibrated("click_server"):
+                        self._log_info("server_clicked", method="calibrated", template="click_server")
+                        server_clicked = True
+                    # Try click_server2 as alternative (we know it exists from previous check)
+                    elif self._click_calibrated("click_server2"):
+                        self._log_info("server_clicked", method="calibrated", template="click_server2")
+                        server_clicked = True
+                    elif self._click_calibrated("click_server3"):
+                        self._log_info("server_clicked", method="calibrated", template="click_server3")
+                        server_clicked = True
+                    elif self._click_calibrated("click_server4"):
+                        self._log_info("server_clicked", method="calibrated", template="click_server4")
+                        server_clicked = True
+                    elif self._click_calibrated("click_server5"):
+                        self._log_info("server_clicked", method="calibrated", template="click_server5")
+                        server_clicked = True
 
                 if not server_clicked:
                     # Fallback: use keyboard down arrow to select first result
@@ -992,6 +1275,165 @@ class AutoSimRunner:
             return False
         return self._click_tpl(name, conf, timeout_s=0.5)
 
+    def _detect_header_bottom(self, window_region: Dict[str, int], roi_rect: Tuple[int, int, int, int]) -> Optional[int]:
+        """Detect the Y coordinate just below the header by locating the first strong horizontal divider.
+
+        Returns the absolute Y (screen space) of the divider + padding, or None if not found.
+        """
+        try:
+            # Extract only what's needed
+            H = int(window_region["height"]) if isinstance(window_region, dict) else int(window_region[3] - window_region[1])
+
+            roi_left, roi_top, roi_right, roi_bottom = map(int, roi_rect)
+            # Focus a band near the top of the server list area
+            band_top = roi_top
+            band_bottom = min(roi_bottom, roi_top + max(20, int(0.12 * H)))  # ~12% of window height
+            band_left = roi_left
+            band_right = roi_right
+            if band_bottom <= band_top or band_right <= band_left:
+                return None
+
+            # Grab the band and run edge + Hough to find long horizontal lines
+            with mss.mss() as sct:
+                frame = np.array(sct.grab({
+                    "left": band_left,
+                    "top": band_top,
+                    "width": max(1, band_right - band_left),
+                    "height": max(1, band_bottom - band_top),
+                }))
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGRA2GRAY)
+            # Light blur, then Canny
+            try:
+                gray = cv2.GaussianBlur(gray, (3, 3), 0)
+            except Exception:
+                pass
+            edges = cv2.Canny(gray, 40, 120)
+            # Probabilistic Hough to get segments
+            h, w = edges.shape[:2]
+            min_len = max(60, int(0.25 * w))  # long line
+            lines = cv2.HoughLinesP(edges, 1, np.pi / 180, threshold=80, minLineLength=min_len, maxLineGap=6)
+            if lines is None:
+                return None
+            # Find the first strong horizontal near the top
+            candidate_y = None
+            for seg in lines[:, 0, :]:
+                x1, y1, x2, y2 = map(int, seg)
+                # Horizontal tolerance
+                if abs(y2 - y1) <= 2 and abs(x2 - x1) >= min_len:
+                    y_abs = band_top + min(y1, y2)
+                    if candidate_y is None or y_abs < candidate_y:
+                        candidate_y = y_abs
+            if candidate_y is None:
+                return None
+            # Padding below the divider to avoid clicking into the header row
+            pad = max(6, int(0.008 * H))  # ~0.8% of height
+            header_bottom = int(candidate_y + pad)
+            self._log_info("header_divider_detected", divider_y=int(candidate_y), header_bottom=int(header_bottom), band_top=int(band_top))
+            return header_bottom
+        except Exception as e:
+            try:
+                self._log_warn("header_divider_detection_failed", error=str(e))
+            except Exception:
+                pass
+            return None
+
+    def _check_server_template_enhanced(self, template_name: str, confidence_levels: Tuple[float, ...], frame_bounds: Tuple[int, int, int, int]) -> Optional[Tuple[int, int]]:
+        """Try enhanced detection for a single server template name with ROI recheck and fallback.
+
+        Returns coordinates (x, y) if found, None otherwise.
+        """
+        try:
+            if not self.templates.exists(template_name):
+                return None
+            self._log_info(f"checking_{template_name}_template_enhanced")
+            tpl_path = self.templates.path(template_name)
+            if not tpl_path:
+                self._log_info(f"{template_name}_path_not_resolved", message=f"Could not resolve {template_name} template path")
+                return None
+            self._log_info(f"{template_name}_path_resolved", path=str(tpl_path))
+
+            left, top, right, bottom = frame_bounds
+            for confidence in confidence_levels:
+                try:
+                    result = self.vision.find_server_template_enhanced(str(tpl_path), confidence=confidence)
+                    if result:
+                        # Skip verify ROI step - the enhanced detection already found it with good confidence
+                        # The verify step was causing false negatives due to overly restrictive ROI
+                        self._log_info(f"{template_name}_found_enhanced",
+                            message=f"Found {template_name} template with enhanced detection - servers available",
+                            confidence_used=confidence,
+                            match_details=result,
+                            verified=False,  # No secondary verification needed
+                            method="enhanced"
+                        )
+                        return result  # Return the actual coordinates
+                    else:
+                        self._log_info(f"{template_name}_attempt_enhanced", confidence=confidence, found=False)
+                except Exception as e:
+                    self._log_info(f"{template_name}_enhanced_error", error=str(e), confidence=confidence)
+                    # Fallback to standard detection for this confidence level
+                    try:
+                        result = self.vision.find_template(str(tpl_path), confidence=confidence)
+                        if result:
+                            self._log_info(f"{template_name}_found_fallback",
+                                message=f"Found {template_name} template with fallback detection",
+                                confidence_used=confidence,
+                                match_details=result,
+                                method="fallback"
+                            )
+                            return result  # Return the actual coordinates
+                    except Exception as fallback_e:
+                        self._log_info(f"{template_name}_fallback_error", error=str(fallback_e))
+
+            self._log_info(f"{template_name}_not_found", message=f"{template_name} template not found at any confidence level")
+            return None
+        except Exception as e:
+            self._log_info("template_check_error", template=template_name, error=str(e))
+            return None
+
+    def _click_at_detected_coords(self, coords: Tuple[int, int], template_name: str) -> bool:
+        """Click at detected coordinates with proper clamping and logging."""
+        try:
+            x, y = coords
+
+            # If this is a server-row click, bias the click slightly downward to avoid header/label hits
+            y_offset = 0
+            try:
+                if str(template_name).startswith("click_server") or template_name in {"click_server", "click_server2", "click_server3", "click_server4", "click_server5"}:
+                    rect = self._get_ark_rect_by_proc() or self._get_virtual_screen_rect()
+                    if rect:
+                        _, top, _, bottom = rect
+                        H = max(1, bottom - top)
+                        # About 1.2% of window height; ~26px on 2160p
+                        y_offset = int(0.012 * H)
+                    else:
+                        # Conservative fallback offset
+                        y_offset = 22
+            except Exception:
+                pass
+
+            adj_x = int(x)
+            adj_y = int(y) + int(y_offset)
+
+            # Clamp to virtual screen bounds to avoid off-screen clicks
+            cx, cy, clamped = self._clamp_coords(adj_x, adj_y)
+            if clamped:
+                self._log_warn("detected_coords_clamped", template=template_name, from_x=int(x), from_y=int(y), offset_y=int(y_offset), to_x=cx, to_y=cy)
+
+            if y_offset:
+                self._log_info("detected_click_adjustment", template=template_name, original_x=int(x), original_y=int(y), offset_y=int(y_offset), adjusted_x=int(cx), adjusted_y=int(cy))
+
+            self._log_info("clicking_detected_coords", template=template_name, x=cx, y=cy)
+            self.input.move_mouse(cx, cy)
+            self._sleep(0.02)
+            self.input.click_button('left', presses=1, interval=0.0)
+            self._sleep(self.cfg.click_settle)
+            self._log_info("server_clicked", method="detected_coords", template=template_name, x=cx, y=cy)
+            return True
+        except Exception as e:
+            self._log_error("detected_coords_click_error", template=template_name, error=str(e))
+            return False
+
     # --------------- Calibrated fallback ---------------
     def _parse_norm(self, key: str) -> Optional[Tuple[float, float]]:
         try:
@@ -1008,6 +1450,8 @@ class AutoSimRunner:
                     return (0.531510, 0.301389)  # Click on server in search results
                 elif key == "click_server2":
                     return (0.531510, 0.301389)  # Same as click_server; one server expected
+                elif key in ("click_server3", "click_server4", "click_server5"):
+                    return (0.531510, 0.301389)  # Same as click_server; additional variants
                 elif key == "press_start":
                     return (0.500781, 0.804167)  # Press start button coordinates - updated
                 elif key == "back":
@@ -1016,7 +1460,8 @@ class AutoSimRunner:
             parts = [p.strip() for p in str(raw).split(',')]
             if len(parts) != 2:
                 return None
-            nx = float(parts[0]); ny = float(parts[1])
+            nx = float(parts[0])
+            ny = float(parts[1])
             if not (0.0 <= nx <= 1.0 and 0.0 <= ny <= 1.0):
                 return None
             return nx, ny
@@ -1032,6 +1477,8 @@ class AutoSimRunner:
                 return (0.531510, 0.301389)  # Click on server in search results
             elif key == "click_server2":
                 return (0.531510, 0.301389)  # Same as click_server; one server expected
+            elif key in ("click_server3", "click_server4", "click_server5"):
+                return (0.531510, 0.301389)  # Same as click_server; additional variants
             elif key == "press_start":
                 return (0.500781, 0.804167)  # Press start button coordinates - updated
             elif key == "back":
@@ -1043,8 +1490,10 @@ class AutoSimRunner:
             import mss
             with mss.mss() as sct:
                 vb = sct.monitors[0]
-                L = int(vb['left']); T = int(vb['top'])
-                R = L + int(vb['width']); B = T + int(vb['height'])
+                L = int(vb['left'])
+                T = int(vb['top'])
+                R = L + int(vb['width'])
+                B = T + int(vb['height'])
                 return L, T, R, B
         except Exception:
             return None
@@ -1107,18 +1556,23 @@ class AutoSimRunner:
             self._log_warn("calibrated_no_rect", target=name)
             return False
         L, T, R, B = rect
-        W = max(1, R - L); H = max(1, B - T)
+        W = max(1, R - L)
+        H = max(1, B - T)
         nx, ny = norm
         x = L + int(nx * W)
         y = T + int(ny * H)
 
         # Debug logging
-        self._log_info("calibrated_debug",
-                      target=name,
-                      norm_x=nx, norm_y=ny,
-                      window_rect=f"({L},{T},{R},{B})",
-                      window_size=f"{W}x{H}",
-                      calculated_x=x, calculated_y=y)
+        self._log_info(
+            "calibrated_debug",
+            target=name,
+            norm_x=nx,
+            norm_y=ny,
+            window_rect=f"({L},{T},{R},{B})",
+            window_size=f"{W}x{H}",
+            calculated_x=x,
+            calculated_y=y,
+        )
 
         cx, cy, clamped = self._clamp_coords(x, y)
         if clamped:
@@ -1156,8 +1610,8 @@ class AutoSimRunner:
         bounds = self._virtual_bounds()
         if not bounds:
             return x, y, False
-        l, t, r, b = bounds
-        cx = max(l, min(r, int(x)))
+        L, t, r, b = bounds
+        cx = max(L, min(r, int(x)))
         cy = max(t, min(b, int(y)))
         return cx, cy, (cx != x or cy != y)
 

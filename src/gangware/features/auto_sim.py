@@ -726,8 +726,9 @@ class AutoSimRunner:
                                         if not row_confirmed:
                                             alt_stars = [t for t in star_templates if t != sname and self.templates.exists(t)]
                                             if alt_stars:
-                                                verify_pad_x = max(12, int(0.015 * width))
-                                                verify_pad_y = max(12, int(0.020 * height))
+                                                # Slightly wider pad for blur/scale; a bit taller than wide
+                                                verify_pad_x = max(12, int(0.018 * width))
+                                                verify_pad_y = max(12, int(0.024 * height))
                                                 v_left = max(left, sx - verify_pad_x)
                                                 v_right = min(left + width, sx + verify_pad_x)
                                                 v_top = max(top, sy - verify_pad_y)
@@ -745,7 +746,8 @@ class AutoSimRunner:
                                                         apath = self.templates.path(alt)
                                                         if not apath:
                                                             continue
-                                                        vcoords = self._find(apath, conf=0.68, timeout_s=0.12)
+                                                        # Slightly lower threshold to tolerate blur
+                                                        vcoords = self._find(apath, conf=0.64, timeout_s=0.14)
                                                         if vcoords:
                                                             ax, ay = map(int, vcoords)
                                                             if abs(ax - sx) <= verify_pad_x and abs(ay - sy) <= verify_pad_y:
@@ -757,16 +759,20 @@ class AutoSimRunner:
                                                             self.vision.set_search_roi(prev_roi_verify)
                                                     except Exception:
                                                         pass
-                                            self._log_info("star_secondary_verify", needed=not row_confirmed, second_ok=bool(second_ok))
+                                        self._log_info("star_secondary_verify", needed=not row_confirmed, second_ok=bool(second_ok))
 
                                         accept_this = False
+                                        # Strong primary acceptance if geometric gates pass (helps blurred 1080p)
+                                        strong_primary = (float(sc) >= 0.66)
                                         # In star-only mode, require either row_confirmed (if row templates exist) or second_ok
                                         if getattr(self.cfg, 'star_only_mode', False):
                                             any_row_tpl = any(self.templates.exists(rn) for rn in ("click_server", "click_server2", "click_server3", "click_server4", "click_server5"))
                                             if any_row_tpl:
-                                                accept_this = bool(row_confirmed)
+                                                # Accept if row confirmed OR secondary star agreed OR strong primary match
+                                                accept_this = bool(row_confirmed or second_ok or strong_primary)
                                             else:
-                                                accept_this = bool(second_ok)
+                                                # Without row templates, accept strong primary or second_ok
+                                                accept_this = bool(second_ok or strong_primary)
                                         else:
                                             # Non star-only: require row_confirmed
                                             accept_this = bool(row_confirmed)
@@ -1957,3 +1963,9 @@ class AutoSimRunner:
 
     def _log_error(self, event: str, **fields):
         self._log(logging.ERROR, event, **fields)
+
+# --------------------------------------------------------------------------------------
+# Backwards-compatibility alias
+# Some tests and older code import AutoSimFeature from this module.
+# Keep an alias so the public API remains stable.
+AutoSimFeature = AutoSimRunner

@@ -159,9 +159,14 @@ class VisionController:
                     })
                 logger.debug("vision: skipped region %s due to near-black frame (std=%.3f)", str(region), float(std_val))
                 continue
-            # Fast pass: few scales, edges method only
+            # Fast pass: few scales, emphasize illumination-invariant modes
             t_fast0 = time.perf_counter()
-            best_score, best_loc, best_wh, meta = self._best_match_multi(screenshot_gray, template_gray, fast_scales, modes=["edges", "edges_center"])
+            best_score, best_loc, best_wh, meta = self._best_match_multi(
+                screenshot_gray,
+                template_gray,
+                fast_scales,
+                modes=["edges", "grad", "gray_clahe"],
+            )
             t_fast1 = time.perf_counter()
             logger.debug("vision: fast pass best_score=%.3f meta=%s", float(best_score), str(meta))
             if best_score >= confidence and best_loc is not None and best_wh is not None:
@@ -197,10 +202,15 @@ class VisionController:
                 best_overall_region = region
                 best_overall_meta = meta
 
-            # Slow fallback: full scales and all methods (skip if fast-only mode is enabled)
+            # Slow fallback: full scales and broader methods (skip if fast-only mode is enabled)
             if not fast_only:
                 t_slow0 = time.perf_counter()
-                slow_score, slow_loc, slow_wh, slow_meta = self._best_match_multi(screenshot_gray, template_gray, full_scales)
+                slow_score, slow_loc, slow_wh, slow_meta = self._best_match_multi(
+                    screenshot_gray,
+                    template_gray,
+                    full_scales,
+                    modes=["gray_blur", "gray_eq", "gray_clahe", "edges", "grad"],
+                )
                 t_slow1 = time.perf_counter()
                 logger.debug("vision: slow pass best_score=%.3f meta=%s", float(slow_score), str(slow_meta))
                 if slow_score >= confidence and slow_loc is not None and slow_wh is not None:
@@ -524,6 +534,15 @@ class VisionController:
             return cv2.Canny(img, 50, 150)
 
     def _screen_variants(self, gray: np.ndarray) -> dict:
+        """Return multiple illumination-invariant representations of the screen.
+
+        Includes:
+        - gray_blur: lightly denoised grayscale
+        - gray_eq: global histogram equalization
+        - gray_clahe: local contrast-limited equalization (robust to gamma/brightness)
+        - edges: Canny edges with adaptive thresholds
+        - grad: gradient magnitude (Sobel), resilient to color/gamma shifts
+        """
         try:
             blur = cv2.GaussianBlur(gray, (3, 3), 0)
         except Exception:
@@ -532,8 +551,26 @@ class VisionController:
             eq = cv2.equalizeHist(gray)
         except Exception:
             eq = gray
+        # CLAHE for local contrast (handle bright/dark HDR-like captures)
+        try:
+            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+            cla = clahe.apply(gray)
+        except Exception:
+            cla = eq
         edges = self._edges(gray)
-        return {"gray_blur": blur, "gray_eq": eq, "edges": edges}
+        # Gradient magnitude (normalized to 8-bit)
+        try:
+            gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+            gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+            mag = cv2.magnitude(gx, gy)
+            mmin, mmax = float(mag.min()), float(mag.max())
+            if mmax > mmin:
+                grad = cv2.convertScaleAbs((mag - mmin) * (255.0 / (mmax - mmin)))
+            else:
+                grad = np.zeros_like(gray)
+        except Exception:
+            grad = edges
+        return {"gray_blur": blur, "gray_eq": eq, "gray_clahe": cla, "edges": edges, "grad": grad}
 
     def _make_tile_mask(self, shape, left=0.08, right=0.08, top=0.22, bottom=0.18):
         """Binary mask that keeps the inner area of an item tile (ignores digits/shield)."""
@@ -561,6 +598,11 @@ class VisionController:
         return cv2.resize(tpl, (nw, nh), interpolation=cv2.INTER_AREA if scale < 1.0 else cv2.INTER_CUBIC)
 
     def _tpl_variants(self, tpl: np.ndarray) -> dict:
+        """Create multiple template variants to match under diverse conditions.
+
+        Note: We keep an 'edges_center' variant masked for inventory tiles, but
+        we also expose CLAHE and gradient to improve robustness for icons like the star.
+        """
         try:
             blur = cv2.GaussianBlur(tpl, (3, 3), 0)
         except Exception:
@@ -569,8 +611,25 @@ class VisionController:
             eq = cv2.equalizeHist(tpl)
         except Exception:
             eq = tpl
+        try:
+            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+            cla = clahe.apply(tpl)
+        except Exception:
+            cla = eq
         edges = self._edges(tpl)
-        # new: mask out corners (digits, shield, borders)
+        # Gradient magnitude
+        try:
+            gx = cv2.Sobel(tpl, cv2.CV_32F, 1, 0, ksize=3)
+            gy = cv2.Sobel(tpl, cv2.CV_32F, 0, 1, ksize=3)
+            mag = cv2.magnitude(gx, gy)
+            mmin, mmax = float(mag.min()), float(mag.max())
+            if mmax > mmin:
+                grad = cv2.convertScaleAbs((mag - mmin) * (255.0 / (mmax - mmin)))
+            else:
+                grad = edges
+        except Exception:
+            grad = edges
+        # Optional: center mask used for inventory tiles; harmless for others
         try:
             mask = self._make_tile_mask(tpl.shape)
         except Exception:
@@ -582,7 +641,7 @@ class VisionController:
                 edges_center = edges
         else:
             edges_center = edges
-        return {"gray_blur": blur, "gray_eq": eq, "edges": edges, "edges_center": edges_center}
+        return {"gray_blur": blur, "gray_eq": eq, "gray_clahe": cla, "edges": edges, "edges_center": edges_center, "grad": grad}
 
     def _match_methods(self, modes: list[str], screen_v: dict, tpl_v: dict, scale: float) -> tuple[float, Optional[tuple[int, int]], Optional[dict]]:
         best_local_score = -1.0

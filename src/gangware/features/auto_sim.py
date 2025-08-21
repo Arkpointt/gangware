@@ -382,6 +382,28 @@ class AutoSimRunner:
         restarting_after_no_session = False
 
         # Adaptive state detection - determine where we are in the UI flow
+        # Ensure Ark is foreground and apply saved ROI mapped to Ark window before detection
+        try:
+            # Hide overlay briefly to allow Ark to receive focus (GUI-thread safe)
+            if self.overlay and hasattr(self.overlay, 'set_visible_safe'):
+                self.overlay.set_visible_safe(False)
+                self._log_info("overlay_hidden_pre_start")
+            elif self.overlay and hasattr(self.overlay, 'set_visible'):
+                # Fallback if safe method unavailable
+                self.overlay.set_visible(False)
+                self._log_info("overlay_hidden_pre_start")
+        except Exception:
+            pass
+        try:
+            if hasattr(self, '_ensure_ark_foreground'):
+                self._ensure_ark_foreground(timeout=3.0)
+        except Exception:
+            pass
+        try:
+            self._apply_saved_roi_window_bound()
+        except Exception:
+            pass
+
         self._log_info("starting_state_detection")
         try:
             current_state = self._detect_current_state()
@@ -395,7 +417,10 @@ class AutoSimRunner:
         self._log_info("hiding_overlay_and_waiting")
         self._status("Sim: Starting in 2 seconds...")
         try:
-            if self.overlay and hasattr(self.overlay, 'set_visible'):
+            if self.overlay and hasattr(self.overlay, 'set_visible_safe'):
+                self.overlay.set_visible_safe(False)
+                self._log_info("overlay_hidden")
+            elif self.overlay and hasattr(self.overlay, 'set_visible'):
                 self.overlay.set_visible(False)
                 self._log_info("overlay_hidden")
         except Exception as e:
@@ -1118,6 +1143,133 @@ class AutoSimRunner:
                     continue  # Restart from join_game step
         finally:
             self._running.clear()
+
+    # --------------- Focus/ROI helpers ---------------
+    def _ensure_ark_foreground(self, timeout: float = 3.0) -> bool:
+        """Try to bring ArkAscended.exe to the foreground within timeout."""
+        try:
+            import ctypes
+            user32 = ctypes.windll.user32
+            kernel32 = ctypes.windll.kernel32
+            from ctypes import wintypes
+        except Exception:
+            return False
+        import time as _t
+        end = _t.time() + max(0.0, float(timeout))
+        SW_RESTORE = 9
+
+        @ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+        def _enum_proc(hwnd, lparam):
+            try:
+                if not user32.IsWindowVisible(hwnd):
+                    return True
+                pid = wintypes.DWORD()
+                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+                hproc = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid.value)
+                if not hproc:
+                    return True
+                try:
+                    buf_len = wintypes.DWORD(260)
+                    while True:
+                        buf = ctypes.create_unicode_buffer(buf_len.value)
+                        ok = kernel32.QueryFullProcessImageNameW(hproc, 0, buf, ctypes.byref(buf_len))
+                        if ok:
+                            exe = os.path.basename(buf.value or "").lower()
+                            if exe == "arkascended.exe":
+                                # Restore and foreground
+                                try:
+                                    user32.ShowWindow(hwnd, SW_RESTORE)
+                                except Exception:
+                                    pass
+                                try:
+                                    user32.SetForegroundWindow(hwnd)
+                                except Exception:
+                                    pass
+                                return False
+                            break
+                        needed = buf_len.value
+                        if needed <= len(buf):
+                            break
+                        buf_len = wintypes.DWORD(needed)
+                finally:
+                    kernel32.CloseHandle(hproc)
+            except Exception:
+                return True
+            return True
+
+        # quick check if already foreground
+        try:
+            hwnd = user32.GetForegroundWindow()
+            if hwnd:
+                length = user32.GetWindowTextLengthW(hwnd)
+                buf = ctypes.create_unicode_buffer(length + 1)
+                user32.GetWindowTextW(hwnd, buf, length + 1)
+                # best-effort check; we'll still enumerate below
+        except Exception:
+            pass
+
+        while _t.time() < end:
+            try:
+                user32.EnumWindows(_enum_proc, 0)
+            except Exception:
+                break
+            # Validate
+            try:
+                hwnd2 = user32.GetForegroundWindow()
+                if hwnd2:
+                    # Foreground check by process name
+                    pid = wintypes.DWORD()
+                    user32.GetWindowThreadProcessId(hwnd2, ctypes.byref(pid))
+                    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+                    hproc = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid.value)
+                    if hproc:
+                        try:
+                            buf_len = wintypes.DWORD(260)
+                            buf = ctypes.create_unicode_buffer(buf_len.value)
+                            if kernel32.QueryFullProcessImageNameW(hproc, 0, buf, ctypes.byref(buf_len)):
+                                if os.path.basename(buf.value or "").lower() == "arkascended.exe":
+                                    return True
+                        finally:
+                            kernel32.CloseHandle(hproc)
+            except Exception:
+                pass
+            _t.sleep(0.1)
+        return False
+
+    def _apply_saved_roi_window_bound(self) -> None:
+        """Apply saved relative ROI from config mapped to current Ark window bounds."""
+        rel = None
+        try:
+            rel = str(self.config_manager.get("vision_roi", fallback="")).strip()
+        except Exception:
+            rel = None
+        if not rel or os.environ.get("GW_VISION_ROI"):
+            return
+        # Get Ark window bounds
+        win = self._get_ark_window_region()
+        if not isinstance(win, dict):
+            return
+        try:
+            parts = [float(p.strip()) for p in rel.split(',')]
+            if len(parts) != 4:
+                return
+            rx, ry, rw, rh = parts
+            L = int(win.get('left', 0)); T = int(win.get('top', 0)); W = int(win.get('width', 0)); H = int(win.get('height', 0))
+            if W <= 0 or H <= 0:
+                return
+            ax = int(L + rx * W)
+            ay = int(T + ry * H)
+            aw = int(rw * W)
+            ah = int(rh * H)
+            if aw > 0 and ah > 0:
+                os.environ["GW_VISION_ROI"] = f"{ax},{ay},{aw},{ah}"
+                try:
+                    self._log_info("roi_applied_pre_sim", abs=f"{ax},{ay},{aw},{ah}")
+                except Exception:
+                    pass
+        except Exception:
+            return
 
     # --------------- High-level steps ---------------
     def _ensure_main_menu(self) -> bool:

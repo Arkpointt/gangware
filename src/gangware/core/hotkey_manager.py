@@ -109,9 +109,8 @@ class HotkeyManager(threading.Thread):
         try:
             _roi_str = str(self.config_manager.get("vision_roi", fallback="")).strip()
             if _roi_str:
-                # Check if this is old absolute format and convert to relative
-                if ',' in _roi_str and not _roi_str.count('.') >= 3:  # Likely absolute (no decimals)
-                    # Convert existing absolute ROI to relative and save it
+                # If this is legacy absolute (no decimals), convert once to relative using current monitor
+                if ',' in _roi_str and not _roi_str.count('.') >= 3:
                     monitor_bounds = self._get_current_monitor_bounds()
                     rel_roi = self._absolute_to_relative_roi(_roi_str, monitor_bounds)
                     if rel_roi:
@@ -123,19 +122,16 @@ class HotkeyManager(threading.Thread):
                         _roi_str = rel_roi
                         logging.getLogger(__name__).info("startup: converted absolute ROI to relative: %s", rel_roi)
 
-                # Convert relative to absolute for current session
+                # Defer absolute application to feature start (e.g., Auto Sim).
+                # Avoid mapping ROI at startup to prevent misalignment when Ark is not foreground.
                 if _roi_str and "GW_VISION_ROI" not in os.environ:
-                    abs_roi = self._relative_to_absolute_roi(_roi_str)
-                    if abs_roi:
-                        os.environ["GW_VISION_ROI"] = abs_roi
-                        logging.getLogger(__name__).info("startup: applied relative ROI as absolute: %s", abs_roi)
+                    logging.getLogger(__name__).info("startup: deferred ROI application until feature start")
 
-            # Prefill ROI status in overlay if available
+            # Prefill ROI status in overlay if available (show absolute if applied)
             if _roi_str and self.overlay and hasattr(self.overlay, "set_roi_status"):
                 try:
-                    # Show the absolute coordinates in overlay for user reference
                     abs_roi = os.environ.get("GW_VISION_ROI", "")
-                    self.overlay.set_roi_status(True, abs_roi)
+                    self.overlay.set_roi_status(bool(abs_roi), abs_roi)
                 except Exception:
                     pass
         except Exception:
@@ -504,6 +500,84 @@ class HotkeyManager(threading.Thread):
             return int(rc.left), int(rc.top), int(rc.right), int(rc.bottom)
         except Exception:
             return None
+
+    def _ensure_ark_foreground(self, timeout: float = 3.0) -> bool:
+        """Try to make ArkAscended.exe the foreground window within timeout.
+
+        Returns True if Ark becomes foreground; False otherwise.
+        """
+        if user32 is None or kernel32 is None:
+            return False
+        import time as _t
+        end = _t.time() + max(0.0, float(timeout))
+        SW_RESTORE = 9
+
+        def _find_hwnd_by_proc() -> ctypes.wintypes.HWND | None:
+            target_exe = "arkascended.exe"
+            found_hwnd = ctypes.wintypes.HWND()
+
+            @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.wintypes.HWND, ctypes.wintypes.LPARAM)
+            def _enum_proc(hwnd, lparam):
+                try:
+                    if not user32.IsWindowVisible(hwnd):
+                        return True
+                    pid = ctypes.wintypes.DWORD()
+                    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+                    hproc = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid.value)
+                    if not hproc:
+                        return True
+                    try:
+                        buf_len = ctypes.wintypes.DWORD(260)
+                        while True:
+                            buf = ctypes.create_unicode_buffer(buf_len.value)
+                            ok = kernel32.QueryFullProcessImageNameW(hproc, 0, buf, ctypes.byref(buf_len))
+                            if ok:
+                                exe = os.path.basename(buf.value or "").lower()
+                                if exe == target_exe:
+                                    found_hwnd.value = hwnd
+                                    return False
+                                break
+                            needed = buf_len.value
+                            if needed <= len(buf):
+                                break
+                            buf_len = ctypes.wintypes.DWORD(needed)
+                    finally:
+                        kernel32.CloseHandle(hproc)
+                except Exception:
+                    return True
+                return True
+
+            user32.EnumWindows(_enum_proc, 0)
+            return found_hwnd if found_hwnd.value else None
+
+        # If already foreground, done
+        try:
+            if self._is_ark_active():
+                return True
+        except Exception:
+            pass
+
+        while _t.time() < end:
+            hwnd = _find_hwnd_by_proc()
+            if hwnd and hwnd.value:
+                try:
+                    user32.ShowWindow(hwnd, SW_RESTORE)
+                except Exception:
+                    pass
+                try:
+                    user32.SetForegroundWindow(hwnd)
+                except Exception:
+                    pass
+                # Confirm
+                try:
+                    if self._is_ark_active():
+                        return True
+                except Exception:
+                    pass
+            _t.sleep(0.1)
+        return False
+
     def run(self):
         """Main loop for hotkey management with reduced branching."""
         self._ensure_calibrated()
@@ -570,6 +644,20 @@ class HotkeyManager(threading.Thread):
             if user32 is None:
                 return
             is_down_f7 = bool(user32.GetAsyncKeyState(0x76) & 0x8000)
+            # When SIM calibration is active, use polling edge-detect to capture coords
+            if getattr(self, "_sim_cal_active", False):
+                # Rising edge: press -> capture
+                if is_down_f7 and not getattr(self, "_f7_down", False):
+                    self._f7_down = True
+                    try:
+                        self._sim_cal_capture_step()
+                    except Exception:
+                        pass
+                # Falling edge: release -> reset
+                elif not is_down_f7 and getattr(self, "_f7_down", False):
+                    self._f7_down = False
+                return
+            # Otherwise, normal recalibration UI flow
             self._update_f7_state(is_down_f7, set_gate=False)
         except Exception:
             pass

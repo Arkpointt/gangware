@@ -1,273 +1,214 @@
-Blueprint for the GANGWARE AI Assistant (v4.0)
+Gangware Engineering Blueprint (v5.0)
+
 Changelog
-2025-08-19: Major performance o6) Calibration Page Structure
-- Purpose: guide user to capture four items:
-  - Inventory Key (keyboard/mouse)
-  - Tek Cancel Key (keyboard/mouse)
-  - Inventory Template (hover search bar and press F8)
-  - **Manual ROI (F6 two-press capture for precise armor matching area)**
-- Each task row contains: label, action button, and a compact status box (initial "[ None ]", becomes "[ Captured ]" or "[ key ]").
-- **F6 ROI row displays "[ Set ]" with tooltip showing coordinates when captured**
-- Start button is the primary action aligned right. Enabled only when all items are captured.
-- Signals and wiring:
-  - capture_inventory -> prompt to capture inventory key
-  - capture_tek -> prompt to capture tek cancel key
-  - capture_template -> F8-triggered template capture
-  - **capture_roi -> F6 two-press manual ROI selection with visual feedback**
-  - start -> allow_calibration_start gate to proceedupdate (v4.0). Implemented sub-second armor swapping with F6 manual ROI capture, template cropping optimizations, fast/slow pass matching, ROI calibration bypass, and multi-monitor coordinate handling. Achieved target of <1 second total F2 execution time.
+- 2025-08-21: Generalized blueprint from vision/UI-only to a full project engineering blueprint; added engineering principles, workflows, testing/CI, release, observability, performance budgets, and platform constraints. Cleaned prior formatting issues. Preserved UI tokens as an authoritative appendix.
+- 2025-08-19: Major performance update (v4.0). Implemented sub-second armor swapping with F6 manual ROI capture, template cropping optimizations, fast/slow pass matching, ROI calibration bypass, and multi-monitor coordinate handling.
+- 2025-08-18: Added “Gangware UI – AI Design Blueprint” tokens and strict rules section; marked as authoritative for UI visuals.
+- 2025-08-18: Blueprint refactored to support a full-featured, two-page GUI (Main + Calibration).
+- 2025-08-18: UI/Overlay design specification added (Ark-inspired Floating HUD).
+- 2025-08-17: Blueprint upgraded to a “Living Document” with changelog, task checklists, and a system diagram.
+- 2025-08-17: Initial blueprint creation.
 
-2025-08-18: Added "Gangware UI – AI Design Blueprint" tokens and strict rules section; marked as authoritative for UI visuals while preserving prior context.
+Purpose & Scope
+This blueprint is the single source of truth for how Gangware is engineered, tested, released, and supported. It defines:
+- Principles and decision-making
+- Architecture and project structure
+- Development workflow, branching, code quality, and review
+- Testing strategy and CI/CD
+- Configuration, secrets, and environment management
+- Observability and performance budgets
+- Platform constraints (Windows, DPI, multi-monitor)
+- Asset/template capture rules for automation features
+- UI design tokens and visual rules (authoritative appendix)
 
-2025-08-18: Blueprint refactored to support a full-featured, two-page GUI. The interface will now include a "Main" view for displaying hotkeys and a "Calibration" view for setup, with seamless navigation between them. This supersedes the previous simplified UI plan.
+Guiding Principles
+1) Correctness first, speed second: automation must be safe and deterministic before we optimize.
+2) Determinism over flakiness: prefer bounded waits, explicit gates, and idempotent actions.
+3) Explicit observability: every non-trivial path emits structured logs with correlation IDs.
+4) Fail closed: on uncertainty, do the safe thing (don’t click) and log why.
+5) Config over code: behavior toggles via config/env; code contains defaults and safe fallbacks.
+6) Small, reversible steps: short-lived branches, small PRs, fast code reviews.
+7) User empathy: every error must suggest a resolution (missing template paths, DPI hints, etc.).
 
-2025-08-18: UI/Overlay design specification added. Establishes Ark-inspired Floating HUD as the canonical style for all present and future screens.
-
-2025-08-17: Blueprint upgraded to a "Living Document" with a changelog, task checklists, and a system diagram.
-
-2025-08-17: Initial blueprint creation.
-
-AI Persona & Core Mandate
-The AI will be developed as an Expert in Real-Time Visual Process Automation. Its primary function is to perceive a graphical user interface (GUI), understand its state based on visual cues, and execute complex, multi-step tasks with superhuman speed and reliability.
-
-Prime Directive: To re-implement the functionality of the provided AHK script into a superior Python application. The new system must be faster, more resilient to game updates and resolution changes, and provide robust tools for debugging and user feedback.
-
-Design Precedence & Conflict Resolution
-- The "Gangware UI – AI Design Blueprint" Tokens are the visual source of truth. If any instruction elsewhere conflicts, Tokens win (colors, radii, fonts, effects, components).
-- Fonts: Prefer Orbitron (if installed) with fallbacks Segoe UI and Consolas. Do not download external fonts. Older notes that only mention Segoe UI/Consolas remain valid as fallbacks.
-- Key inputs display: Older references to "angled polygon badges" are legacy. Canonical style is cyan keycaps (rounded boxes with bold glowing text) per Tokens.
-- Backgrounds/gradients: May be used, but derive values from BACKGROUND_CARD and BACKGROUND_SECTION Tokens; accent borders/glows remain cyan/orange per Tokens.
-- Resizing/rearranging must not remove required sections; styling remains identical to Tokens.
-
-System Architecture Diagram
+High-Level Architecture
 graph TD;
     subgraph User Interaction
         A[User Presses Hotkey] --> B[HotkeyManager];
         I[GUI Overlay] -- User Clicks --> B;
     end
-    subgraph AI Core
+    subgraph Core
         B --> C[Task Queue];
         C --> D[Worker Thread];
+        D --> F[VisionController];
+        D --> G[InputController];
+        D --> M[Feature Modules];
     end
-    subgraph AI Actions
-        D -- Reads Task --> E[Macros];
-        E -- Uses --> F[VisionController];
-        E -- Uses --> G[InputController];
+    subgraph Environment
+        F -- capture --> H[Game Window];
+        G -- input --> H;
     end
-    subgraph Feedback Loop
-        G -- Interacts with --> H[Game Window];
-        F -- Perceives --> H;
-        D -- Updates --> I;
+    subgraph Observability
+        D -- events --> L[Logging + Artifacts];
+        F -- perf --> L;
     end
 
-Notes:
-
-The GUI will feature a two-page design ("Main" and "Calibration") managed by a QStackedWidget.
-
-Navigation buttons will allow the user to switch between views.
-
-The application will start in "Calibration" mode if setup is incomplete, and in "Main" mode otherwise.
-
-
-UI/Overlay Design Specification (Ark-inspired Floating HUD)
-This specification is authoritative. All current and future UI must adhere to these rules to ensure a consistent design.
-
-1) Concept and Placement
-- Floating HUD overlay anchored to the top-right of the primary screen.
-- Frameless, translucent, always-on-top window, click-through disabled (the overlay is interactive when visible).
-- Primary container uses a subtle horizontal gradient with a cyan accent border.
-
-2) Visual Language
-- Palette: Cyan #00DDFF (primary accent), Orange #FFB800 (secondary category accent), neutrals in the #C8–#E6 range.
-- Background: gradient from rgba(10,25,40,0.85) to rgba(10,25,40,0.60) with a 3px cyan accent line on the left of content containers. Base colors should be derived from BACKGROUND_CARD/BACKGROUND_SECTION Tokens.
-- Title: “GANGWARE” with a subtle cyan glow (implemented using QGraphicsDropShadowEffect, not CSS text-shadow).
-- Typography: use system-safe fonts (Segoe UI/Consolas). Prefer Orbitron if installed; Segoe UI/Consolas are fallbacks per Tokens. Do not depend on external font files. Avoid unsupported QSS like text-shadow.
-
-3) Navigation
-- Segmented navigation with two tabs: MAIN and CALIBRATION.
-- Buttons are checkable; the active tab is indicated via a stronger cyan bottom border and text color. No heavy filled backgrounds.
-- Keep buttons compact: approx 28–32 px tall, padding 6–12 px horizontally.
-
-4) Layout and Density
-- Overall overlay width: ~420 px height: ~260 px initial (auto-resize permitted via content).
-- Margins/padding: root 10 px; container 12 px; grid row spacing 6–10 px; column spacing ~18–25 px.
-- High information density: minimize empty space; avoid large button blocks.
-
-5) Main Page Structure
-- Three columns: COMBAT (cyan), ARMOR SWAP (orange), CORE (cyan).
-- Items:
-  - COMBAT: Medbrew (Shift+Q), HoT (Shift+E), Tek Punch (Shift+R)
-  - ARMOR SWAP: Flak (F2), Tek (F3), Mixed (F4)
-  - CORE: Hide (F1), Recal (F7), Exit (F10)
-- Key badges: angled polygon badges with cyan 2px stroke and a faint cyan fill. Text centered, compact (9–10 pt), medium/semibold. Minimum size ~60x22 px. (Legacy style; canonical display is cyan keycaps per Tokens.)
-
-6) Calibration Page Structure
-- Purpose: guide user to capture three items:
-  - Inventory Key (keyboard/mouse)
-  - Tek Cancel Key (keyboard/mouse)
-  - Inventory Template (hover search bar and press F8)
-- Each task row contains: label, action button, and a compact status box (initial “[ None ]”, becomes “[ Captured ]” or “[ key ]”).
-- Start button is the primary action aligned right. Enabled only when all three items are captured.
-- Signals and wiring:
-  - capture_inventory -> prompt to capture inventory key
-  - capture_tek -> prompt to capture tek cancel key
-  - capture_template -> F8-triggered template capture
-  - start -> allow_calibration_start gate to proceed
-
-7) Feedback and Animations
-- success_flash: brief green (#1BD97B) status tint, ~850 ms, then revert.
-- Hotkey feedback:
-  - flash_hotkey_line(hotkey): quick cyan border/text flash of the corresponding key badge (~400 ms).
-  - set_hotkey_line_active(hotkey): persistent cyan border indicating active/toggled state (e.g., Shift+E HoT).
-  - clear_hotkey_line_active(hotkey, fade): brief fade-out (~300–400 ms) returning to rest style.
-
-8) Keyboard Shortcuts and Behavior
-- HotkeyManager owns global hotkeys: F1 toggle overlay, F7 recalibrate, F10 exit, and in-game macro keys.
-- Overlay provides fallback shortcuts (Application context): F1 toggle visibility, F7 trigger recalibration, F10 close.
-- When switching tabs, update check-state of nav buttons; avoid heavy restyling—use underline/border and weight.
-
-9) Accessibility and Constraints
-- Focus-visible: ensure tab focus is visible on buttons/badges (1–2 px outline acceptable via QSS if needed).
-- Contrast: maintain readable contrast for small text (>= 4.5:1 on dark backgrounds).
-- No external fonts or unsupported QSS properties. Do not use CSS text-shadow; use QGraphicsDropShadowEffect for glow.
-
-10) Do / Don’t
-- Do: keep UI compact, avoid oversized buttons, keep consistent cyan/orange accents, keep animations fast.
-- Do: retain segmented navigation for brand consistency. Note: "angled key badges" are legacy; use cyan keycaps per Tokens.
-- Don’t: introduce heavy fills, large gaps, or long neon glows. Don’t rely on custom font files.
-
-11) Acceptance Criteria
-- The overlay renders top-right, frameless, with cyan-accent gradient container and segmented navigation.
-- Main shows three columns and the listed items with compact cyan keycaps (supersedes earlier "angled key badges").
-- Calibration shows three task rows with status boxes and a Start button, all wired to signals as specified.
-- success_flash and hotkey flash/hold/clear behave as specified.
-- Works with system fonts; no runtime warnings about missing fonts or unsupported QSS.
-
-
-Phase 1: Foundation - The Sensory and Motor Cortex
-Objective: Build core abilities to see and interact with the game world.
-
-[x] Module: Vision System (vision.py)
-
-[x] Module: Control System (controls.py)
-
-[x] Module: Configuration Core (config.py)
-
-Phase 2: Cognition - The Central Nervous System
-Objective: Process user commands, manage internal state, and connect perception to action.
-
-[x] Module: State & Task Management
-
-[x] Implement thread-safe StateManager (state.py).
-
-[x] Implement HotkeyManager thread (core/hotkey_manager.py).
-
-[x] Implement Worker thread (core/worker.py).
-
-Phase 3: Execution - The Procedural Memory
-Objective: Codify high-level tasks into intelligent workflows.
-
-[x] Module: Macro Library (macros/)
-
-[x] Create armor_swapper.py with "Smart Armor" logic.
-
-[x] Create combat.py for Tek Dash and Medbrew macros.
-
-[x] Implement dedicated threading for Medbrew HoT.
-
-**Phase 3.5: Performance Engineering - The Speed Layer**
-**Objective: Achieve sub-second armor swapping through advanced computer vision optimizations.**
-
-[x] **Module: Advanced Armor Matching (armor_matcher.py)**
-
-[x] **Implement hybrid template matching with edge detection and HSV hue validation**
-
-[x] **Create fast/slow pass optimization with early exit on good matches**
-
-[x] **Add template cropping to focus on item icons vs inventory slot backgrounds**
-
-[x] **Implement multi-scale template matching for UI scaling robustness**
-
-[x] **Add performance timing instrumentation and debugging**
-
-[x] **Module: Precision ROI Management**
-
-[x] **Implement F6 two-press manual ROI capture system with visual feedback**
-
-[x] **Add ROI persistence to config.ini and environment variable coordination**
-
-[x] **Create ROI intersection and fallback logic for multi-monitor setups**
-
-[x] **Add F6 ROI snapshot saving to %APPDATA%/Gangware/templates/roi.png**
-
-[x] **Optimize ROI calibration bypass when F6 ROI available (eliminates 2+ second delay)**
-
-[x] **Module: Input System Optimization**
-
-[x] **Reduce mouse movement delays from 20ms to 2ms for instant targeting**
-
-[x] **Optimize click timing and sleep intervals for minimal latency**
-
-[x] **Add comprehensive timing debug for performance analysis**
-
-Phase 4: Interface & Diagnostics - The Frontal Lobe
-Objective: Develop the UI and diagnostics.
-
-[x] Module: User Interface (gui/overlay.py)
-
-[x] Create OverlayWindow with a frameless, top-right, Ark-inspired design.
-
-[x] Implement a QStackedWidget to manage two views: "Main" and "Calibration".
-
-[x] Create navigation buttons to switch between the two views.
-
-[x] "Main" View: Design a clean, multi-column layout to display all macro hotkeys.
-
-[x] "Calibration" View: Design a unified menu for all setup tasks (keybinds, template capture) with interactive buttons and status indicators.
-
-[x] Implement logic to start in the correct view based on calibration_complete flag.
-
-[x] Implement signal/slot system for safe, cross-thread UI updates.
-
-[x] **Add F6 Manual ROI capture with visual feedback and status display**
-
-[x] **Implement real-time calibration status updates and ROI capture confirmation**
-
-[ ] Module: Self-Analysis & Logging
-
-Performance Guardrails (Authoritative)
-- Mouse/UI focus timing: Maintain ~20 ms stabilization before/after focus-critical clicks (e.g., search field) to ensure Ark reliably registers focus. Do NOT lower below ~15 ms without a validated test plan. Baseline movement settle may remain at ~2 ms.
-- Speed vs reliability: Prefer minimal waits everywhere else, but protect UI focus transitions explicitly to avoid regressions.
-- Configurable diagnostics: slow_task_threshold_ms (default 1000), health_monitor (default True), health_interval_seconds (default 5).
-
-Diagnostics & Support Bundle
-- Per-session folder at %APPDATA%/Gangware/logs/session-YYYYmmdd_HHMMSS/
-- Contents: gangware.log, heartbeat.log, health.json, environment.json, artifacts/
-- environment.json includes monitor topology, game window resolution, and borderless state when Ark is foreground at startup.
-- Macro tracing: F2 logs phase timings with correlation IDs (macro=F2 phase=... corr=...).
-
-[x] Configure global logging in main.py.
-
-[x] Integrate logging calls (INFO, DEBUG, ERROR) across all modules.
-
-[x] **Add performance timing instrumentation and debug logging**
-
-[x] **Implement multi-monitor detection and coordinate debugging**
-
-[ ] Implement a "dry run" mode.
-
-Design Consistency Directive
-All future UI changes must conform to the UI/Overlay Design Specification above. Any deviation requires an explicit changelog entry and approval with clear rationale. This ensures the Ark-inspired Floating HUD remains consistent throughout the application.
+Project Structure Conventions
+- src/gangware: application modules
+  - controllers/: vision.py, controls.py, input/output abstractions
+  - features/: user-facing workflows (e.g., auto_sim)
+  - gui/: overlay/Qt UI
+  - core/: hotkeys, worker, health, logging
+  - config/: tunables and constants
+  - vision/: pure image processing and matching utilities
+  - io/: platform-specific helpers (Windows APIs)
+- assets/: bundled templates and images (read-only)
+- %APPDATA%/Gangware/templates/: user-provided templates, override assets
+- logs/: per-session logs and artifacts (auto-created)
+- tests/: unit, integration, e2e (TBD)
+
+Branching, Versioning, and Releases
+- Branching model: trunk-based with short-lived topic branches
+  - main: releasable at all times
+  - feature/<name>: short-lived; open PR to main
+  - hotfix/<ticket>: emergency fixes from main
+- Commit messages: Conventional Commits (feat:, fix:, perf:, refactor:, docs:, test:, chore:)
+- Versioning: SemVer X.Y.Z
+  - bump patch for fixes and perf improvements
+  - bump minor for compatible features
+  - bump major for breaking changes
+- Release channel: tagged releases from main; build artifacts (installer/exe) published with changelog
+
+Coding Standards (Python)
+- Python 3.11+
+- Style: black (88 width), isort, ruff lint; mypy for typed modules
+- Type hints for public APIs and critical internal paths
+- Docstrings: Google or NumPy style consistently; include parameters and returns
+- Logging: use structured log helpers; no print()
+- OS interactions: isolate platform-specific code under io/ modules
+- Threading: never block GUI thread; use worker thread and signals/slots
+
+Development Workflow
+1) Open issue or task with acceptance criteria
+2) Create feature/<name> branch
+3) Implement with unit tests where feasible; add integration test hooks
+4) Update config knobs and env var documentation if behavior changes
+5) Update blueprint (this document) when adding new rules or altering processes
+6) Open PR with:
+   - What and why (design notes), risks, toggles
+   - Logs or screenshots for critical flows
+   - Test evidence and manual QA checklist
+7) Reviewer enforces standards; CI must pass; merge squash
+
+Testing Strategy
+- Unit tests: pure vision utilities, config parsing, helpers
+- Integration tests: VisionController with mocked mss frames; InputController dry-run
+- E2E smoke: launch overlay, simulate start/stop, validate log beacons and state transitions
+- Performance tests: perf toggles (GW_VISION_PERF) and budget assertions
+- Coverage target: 70%+ overall; critical modules >80%
+
+CI/CD (reference pipeline)
+- Lint/type: ruff + mypy
+- Test: pytest with coverage report
+- Build: PyInstaller build on Windows runner
+- Artifacts: upload logs from failed tests; attach build artifacts to releases
+- Security: dependency scan (pip-audit)
+
+Configuration & Secrets
+- Config file: %APPDATA%/Gangware/config.ini (defaults in repo under config/)
+- Env vars (documented, non-exhaustive):
+  - GW_VISION_ROI: absolute ROI "left,top,width,height"
+  - GW_INV_SUBROI: sub-ROI fractions for inventory "l,t,w,h"
+  - GW_VISION_FAST_ONLY: 1 to skip slow multiscale pass
+  - GW_VISION_PERF: 1 to emit perf metrics
+- Secrets: never committed; use Windows Credential Manager or .env.local excluded via .gitignore
+
+Observability and Support
+- Per-session log directory: %APPDATA%/Gangware/logs/session-YYYYmmdd_HHMMSS/
+  - gangware.log, heartbeat.log, health.json, environment.json, artifacts/
+- Structured log events: use consistent event keys (feature=, event=, id=)
+- Artifacts: last_screenshot.png + last_template.png on vision miss
+- Perf: VisionController.get_last_perf() and GW_VISION_PERF for timing
+- Support process: share latest session folder; logs include monitor topology and Ark window bounds
+
+Performance Budgets
+- UI responsiveness: overlay actions < 50 ms
+- Start sequence: state detection fast path < 1.5 s; avoid slow pass unless needed
+- Auto Sim loop:
+  - Search focus + type + apply <= 400 ms typical
+  - Server availability detection <= 500 ms with constrained ROI
+  - Join assessment loop: 150 ms polling; timeout default 15 s
+- Mouse movement settle: ~2–15 ms depending on context; never > 35 ms without rationale
+
+Platform Constraints (Windows)
+- DPI and scaling:
+  - Prefer 100% scaling on all monitors while testing
+  - Override high DPI scaling for the runner executable and Ark (Application mode)
+- Windowing:
+  - Borderless windowed at fixed resolution on primary monitor: -windowed -noborder -ResX=3840 -ResY=2160
+  - Ensure ARK UI scale 1.0 and exact in-game resolution
+- Focus stability:
+  - Run both Ark and Gangware at same integrity level (ideally Administrator)
+  - Disable overlays: Steam/NVIDIA/Discord/Xbox Game Bar
+  - Focus Assist: Alarms only
+- Mouse:
+  - Disable "Snap To" and "Enhance pointer precision"
+  - Temporarily disable vendor mouse drivers/macros during automation
+- Multi-monitor:
+  - Constrain cursor to Ark monitor during automation if needed
+  - Keep taskbar off the Ark monitor or set to auto-hide
+
+Templates & Asset Capture Rules
+- Locations:
+  - Bundled: assets/auto sim
+  - User overrides: %APPDATA%/Gangware/templates/auto_sim
+- Naming & synonyms: use TemplateLibrary canonical names; provide synonyms for backwards-compatibility
+- Capture guidance:
+  - Tight crops on distinctive features; avoid large backgrounds
+  - Re-capture when resolution, UI scale, or HDR setting changes
+  - Maintain both star-only and row templates where applicable
+- Acceptance and gating:
+  - Use geometric gates (header divider, row bands, proximity) to avoid false positives
+  - Document confidence thresholds per template category in code comments and here
+
+Feature Modules: Definition of Done
+- Logs: at least one info beacon per major step; warnings on fallbacks; errors on exceptions
+- Config: tunables documented in config.ini and here
+- Tests: unit coverage where feasible; at least one integration hook
+- Performance: respects budgets; perf toggles tested
+- UI: adheres to Tokens (see appendix)
+- Docs: README and this blueprint updated
+
+Incident Response & Hotfix Protocol
+- Severity triage: S1 (blocking clicks/wrong window), S2 (feature broken), S3 (degraded)
+- Repro bundle: session logs + environment.json + artifacts
+- Hotfix branch hotfix/<ticket> from main; targeted fix; tag patch release with concise changelog
+- Postmortem: root cause, detection gaps, and guardrail additions documented here
+
+Security & Privacy
+- No network telemetry or data collection
+- Local-only logs under %APPDATA%; redact PII if introduced
+- No code injection or memory manipulation; input is standard OS events
+
+Quickstart (Developer)
+- Create virtual environment and install deps per README
+- Run: .\run.bat
+- Enable perf logs (optional): set GW_VISION_PERF=1
+- Force fast-only matching (optional): set GW_VISION_FAST_ONLY=1
+
+Acceptance Criteria (Project-wide)
+- Feature PRs include: rationale, logs/screenshots, tests, config notes
+- CI green (lint, type, tests); build succeeds on Windows runner
+- Performance within budgets or justified
+- UX conforms to UI Tokens; no external fonts; no unsupported QSS
 
 ---
 
-# Gangware UI – AI Design Blueprint 🎨
+Appendix A — Gangware UI – AI Design Blueprint (Authoritative Visual Tokens)
 
-This section is authoritative for UI tokens and visual rules. Do not delete any past design context; if conflicts arise, the tokens and rules below take precedence for visuals while earlier sections remain for historical intent and architecture.
+Purpose
+Defines the exact design system for Gangware’s HUD and Calibration UI. All visual changes must follow these tokens and rules.
 
-## Purpose
-This blueprint defines the exact design system for Gangware’s HUD and Calibration UI. All AI contributions must follow these rules strictly.
-
-## Tokens (Do not change these values)
+Tokens (Do not change these values)
 - COLOR_PRIMARY: #00DDFF (cyan glow)
 - COLOR_ACCENT: #FFB800 (orange glow)
 - COLOR_TEXT: #D5DCE3 (default text)
@@ -281,32 +222,40 @@ This blueprint defines the exact design system for Gangware’s HUD and Calibrat
 - KEYCAP_STYLE: cyan border, bold text, dark background
 - GLOW_RADIUS: 24–36px (depending on widget importance)
 
-## Layout rules
-- Always use the card layout with:
-  - Header → Tabs → Stacked Pages → Footer
-- Main Page must have:
-  - Left: Combat Section
-  - Right: Armor Section
-  - Bottom: Core Section
-- Calibration Page must have:
-  - Keybind Setup section
-  - Visual Template section
-  - Start button in footer
-- Layout may scale (bigger/smaller, grid rearrangement) but styling must remain identical.
+Layout rules
+- Container: Header → Tabs → Stacked Pages → Footer
+- Main Page: Combat (left), Armor (right), Core (bottom)
+- Calibration Page: Keybind Setup, Visual Template, Start button in footer
+- Layout may scale; styling must remain identical
 
-## Styling rules
-- All borders use cyan glow (COLOR_PRIMARY) or orange (COLOR_ACCENT) for highlights.
-- All buttons follow ark-button style: semi-transparent cyan background, border, glow on hover.
-- Section headers use orange text with glow.
-- Keybinds must render as cyan keycaps (rounded boxes with bold glowing text).
-- Footer must always show a status line with STATUS: OPERATIONAL (green if OK).
+Styling rules
+- Buttons: semi-transparent cyan background, border, glow on hover
+- Section headers: orange text with glow
+- Keybinds: cyan keycaps (rounded, bold text)
+- Footer: status line with STATUS: OPERATIONAL (green when OK)
 
-## AI Guidance
-When generating UI code (PyQt6, HTML, CSS, or any language):
-1. Always pull visual values from the tokens above — never invent new colors, fonts, or radii.
-2. If resizing, scaling, or rearranging:
-   - Respect proportions.
-   - Do not remove required sections (Combat, Armor, Core, Calibration).
-3. Glow effects, transparency, and neon feel are mandatory.
-4. If uncertain, default to this design instead of making up new styles.
-5. Document any new component’s token usage (e.g., “button background uses BACKGROUND_SECTION + COLOR_PRIMARY border”).
+Overlay specifics (Ark-inspired Floating HUD)
+- Top-right anchor; frameless, translucent, always-on-top
+- Gradient background (derive from BACKGROUND_* tokens) with cyan accent line
+- Typography: Orbitron preferred (if installed), else Segoe UI/Consolas; no external font downloads
+- No CSS text-shadow; use QGraphicsDropShadowEffect for glow in Qt
+
+Navigation and Interactions
+- Two tabs: MAIN and CALIBRATION; active tab indicated by cyan underline/border
+- Button height ~28–32 px; compact density with small paddings/margins
+- Feedback: success_flash (~850 ms), hotkey flash/hold/clear behaviors
+
+Calibration Page Structure
+- Tasks capture:
+  - Inventory Key (keyboard/mouse)
+  - Tek Cancel Key (keyboard/mouse)
+  - Inventory Template (hover search bar and press F8)
+  - Manual ROI via F6 two-press selection with visual feedback
+- Status boxes: “[ None ]” → “[ Captured ]” or “[ key ]”; ROI shows “[ Set ]” with tooltip of coordinates
+- Start button primary, right-aligned; enabled only when all required items are captured
+
+Acceptance Criteria (UI)
+- Overlay renders top-right; cyan-accent gradient; segmented navigation
+- Main shows three logical areas with compact cyan keycaps
+- Calibration shows required tasks, statuses, and Start button with wiring
+- Animations fast and consistent; no missing fonts or unsupported QSS warnings

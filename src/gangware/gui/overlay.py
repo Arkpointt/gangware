@@ -64,6 +64,9 @@ class OverlaySignals(QObject):
     sim_stop = pyqtSignal()
     sim_cal_start = pyqtSignal()  # begin SIM calibration flow (F7-driven)
     sim_cal_cancel = pyqtSignal() # cancel SIM calibration flow
+    # Thread-safe UI control signals
+    _set_visible_sig = pyqtSignal(bool)
+    _set_status_sig = pyqtSignal(str)
 
 
 class OverlayWindow(QMainWindow):
@@ -167,6 +170,12 @@ class OverlayWindow(QMainWindow):
 
         # Default page
         self._switch_tab(1 if calibration_mode else 0)
+        # Connect thread-safe UI control signals
+        try:
+            self.signals._set_visible_sig.connect(self.set_visible)
+            self.signals._set_status_sig.connect(self.set_status)
+        except Exception:
+            pass
 
         # Load bundled fonts so QSS can use Orbitron even if not installed
         self._load_project_fonts()
@@ -633,12 +642,25 @@ class OverlayWindow(QMainWindow):
         except Exception:
             pass
 
+    # Thread-safe wrappers for background threads
+    def set_status_safe(self, text: str) -> None:
+        try:
+            self.signals._set_status_sig.emit(str(text))
+        except Exception:
+            pass
+
     def prompt_key_capture(self, prompt: str) -> None:
         self.set_status(prompt)
 
     def set_visible(self, visible: bool) -> None:
         try:
             self.setVisible(bool(visible))
+        except Exception:
+            pass
+
+    def set_visible_safe(self, visible: bool) -> None:
+        try:
+            self.signals._set_visible_sig.emit(bool(visible))
         except Exception:
             pass
 

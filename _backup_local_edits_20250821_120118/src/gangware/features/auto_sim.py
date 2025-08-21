@@ -51,35 +51,9 @@ from typing import Optional, Dict, Tuple
 import logging
 import random as _rand
 import ctypes
+import mss
 import numpy as np
 import cv2
-from ..vision.detectors import detect_header_bottom_abs
-
-# Pure helper to detect header divider using controller capture + pure detector
-from typing import Optional as _Opt, Dict as _Dict, Tuple as _Tuple
-
-def _detect_header_divider_feature(vision_controller, window_region: _Dict[str, int], roi_rect: _Tuple[int, int, int, int]) -> _Opt[int]:
-    """Return absolute Y of header bottom within roi_rect using pure detector.
-
-    window_region: dict with left, top, width, height (Ark window bounds)
-    roi_rect: (left, top, right, bottom) in absolute screen coordinates
-    """
-    try:
-        L = int(window_region.get("left", 0))
-        T = int(window_region.get("top", 0))
-        W = int(window_region.get("width", 0))
-        H = int(window_region.get("height", 0))
-        if W <= 0 or H <= 0:
-            return None
-        rl, rt, rr, rb = map(int, roi_rect)
-        # Capture window frame once
-        frame_bgr = vision_controller.capture_region_bgr({"left": L, "top": T, "width": W, "height": H})
-        # Convert roi into frame-local coordinates
-        roi_local = (max(0, rl - L), max(0, rt - T), max(0, rr - L), max(0, rb - T))
-        rel_y = detect_header_bottom_abs(frame_bgr, roi_local)
-        return None if rel_y is None else int(T + int(rel_y))
-    except Exception:
-        return None
 
 
 @dataclass
@@ -584,7 +558,7 @@ class AutoSimRunner:
                                 # Detect header divider line and exclude any detection above it
                                 header_bottom_val = None
                                 try:
-                                    header_bottom_val = _detect_header_divider_feature(self.vision, {"left": left, "top": top, "width": width, "height": height}, (roi_left, roi_top, roi_right, roi_bottom))
+                                    header_bottom_val = self._detect_header_bottom({"left": left, "top": top, "width": width, "height": height}, (roi_left, roi_top, roi_right, roi_bottom))
                                 except Exception:
                                     header_bottom_val = None
 
@@ -665,7 +639,7 @@ class AutoSimRunner:
                             # Compute header bottom once for gating
                             header_bottom_for_star = None
                             try:
-                                header_bottom_for_star = _detect_header_divider_feature(self.vision, {"left": left, "top": top, "width": width, "height": height}, (roi_left, roi_top, roi_right, roi_bottom))
+                                header_bottom_for_star = self._detect_header_bottom({"left": left, "top": top, "width": width, "height": height}, (roi_left, roi_top, roi_right, roi_bottom))
                             except Exception:
                                 header_bottom_for_star = None
 
@@ -903,7 +877,7 @@ class AutoSimRunner:
                                 # Header geometry constraint: any detection must be strictly below header_bottom
                                 header_bottom_val2 = None
                                 try:
-                                    header_bottom_val2 = _detect_header_divider_feature(self.vision, {"left": left, "top": top, "width": width, "height": height}, (roi_left, roi_top, roi_right, roi_bottom))
+                                    header_bottom_val2 = self._detect_header_bottom({"left": left, "top": top, "width": width, "height": height}, (roi_left, roi_top, roi_right, roi_bottom))
                                 except Exception:
                                     header_bottom_val2 = None
 
@@ -1421,7 +1395,8 @@ class AutoSimRunner:
                         candidate_y = y_abs
             if candidate_y is None:
                 return None
-            # Padding below the divider to avoid clicking into the header row
+            # Padding below the n
+            # ivider to avoid clicking into the header row
             pad = max(6, int(0.008 * H))  # ~0.8% of height
             header_bottom = int(candidate_y + pad)
             self._log_info("header_divider_detected", divider_y=int(candidate_y), header_bottom=int(header_bottom), band_top=int(band_top))

@@ -1,25 +1,65 @@
-﻿"""Vision helpers used by the app.
+"""Vision helpers used by the app.
 
-Provides a small VisionController that captures the primary monitor and
-performs template matching using OpenCV. Kept minimal for testability.
+Responsibility:
+- Thin orchestration for screen capture (IO), region selection, and calling
+  pure detectors/matching utilities from gangware.vision.
+- Maintain public API for callers (VisionController and its methods).
+- Centralize thresholds/scales via gangware.config.vision.
+- Structured logging: INFO for state transitions, DEBUG for scores/ROIs.
+- Save lightweight debug artifacts only on detection failure within the
+  active log session directory (see core.logging_setup).
+
+Detectors themselves remain pure functions in gangware.vision.* modules.
 """
+from __future__ import annotations
 
 from typing import Optional, Tuple
+from pathlib import Path
+import logging
 import os
-import ctypes
+import threading
+import time
 
 import cv2
 import numpy as np
 import mss
-import logging
-import threading
-import time
-from pathlib import Path
+
 from ..core.logging_setup import get_artifacts_dir
+from ..config.vision import (
+    FAST_SCALES,
+    FULL_SCALES,
+    SERVER_SCALES_DEFAULT,
+    BLACK_STD_SKIP,
+    FAST_ONLY,
+    PERF_ENABLED,
+    INVENTORY_ITEM_THRESHOLD,
+    ARTIFACT_MAX_DIM,
+)
+from ..vision import (
+    edges,
+    make_tile_mask,
+    apply_mask,
+    resize_tpl,
+    create_server_button_mask,
+    best_match_multi,
+)
+from ..io.win import get_ark_window_region
+
+
+def _ark_window_region() -> Optional[dict]:
+    """Return region of the Ark window if it's the foreground window on Windows.
+
+    Delegates to io.win to keep platform-specific code isolated.
+    """
+    return get_ark_window_region()
 
 
 class VisionController:
-    """Main class for visual perception and template matching."""
+    """Main class for visual perception and template matching.
+
+    This class performs IO (screen capture) and composes pure vision utilities
+    to implement detection workflows.
+    """
 
     def __init__(self) -> None:
         self._tls = threading.local()
@@ -30,6 +70,7 @@ class VisionController:
         self.ui_scale: float = 1.0
         self.ui_scale_ts: float = 0.0  # timestamp when scale was last set
 
+    # --------------------------- screen capture ---------------------------
     def _get_sct(self, force_new: bool = False):
         sct = getattr(self._tls, "sct", None)
         if force_new or sct is None:
@@ -53,19 +94,33 @@ class VisionController:
             sct = self._get_sct(force_new=True)
             return sct.grab(region)
 
-    def find_template(
-        self, template_path: str, confidence: float = 0.8
-    ) -> Optional[Tuple[int, int]]:
-        """Find the template within the Ark window (if focused) or virtual screen.
+    def capture_region_bgr(self, region: dict) -> np.ndarray:
+        """Capture a BGR frame for an absolute region dict {left, top, width, height}."""
+        logger = logging.getLogger(__name__)
+        t0 = time.perf_counter()
+        frame = np.array(self._safe_grab(region))  # BGRA
+        t1 = time.perf_counter()
+        if PERF_ENABLED or logger.isEnabledFor(logging.DEBUG):
+            try:
+                logger.debug("vision: grab (region) %.1fms region=%s", (t1 - t0) * 1000.0, str(region))
+            except Exception:
+                pass
+        return frame[:, :, :3]
 
-        Returns absolute screen coordinates (x, y) of the match center when found,
-        otherwise None.
+    # --------------------------- public API ---------------------------
+    def find_template(self, template_path: str, confidence: float = 0.8) -> Optional[Tuple[int, int]]:
+        """Find a template by multiscale matching within Ark window or full screen.
+
+        Returns absolute screen coordinates (x, y) of the match center when
+        found, otherwise None.
         """
-        # Prefer Ark window; fallback to virtual screen box
+        logger = logging.getLogger(__name__)
+
         sct = self._get_sct()
-        # Choose base region: Ark window if active; else full virtual screen
+        # Prefer Ark window; fallback to virtual screen box
         r0 = _ark_window_region()
         base_region = r0 if r0 is not None else sct.monitors[0]
+
         # Apply ROI override: manual search ROI > env > inventory ROI
         env_roi = os.environ.get("GW_VISION_ROI", "").strip()
         roi_override = None
@@ -83,8 +138,6 @@ class VisionController:
             if isinstance(inv, dict) and inv.get("width", 0) > 0 and inv.get("height", 0) > 0:
                 roi_override = inv
         # Optional sub-ROI relative to inventory ROI (env: GW_INV_SUBROI="l,t,w,h" in 0..1)
-        # This lets users constrain searches to a smaller area inside the inventory panel
-        # without hard-coding absolute pixels. It only applies when no explicit manual ROI is set.
         if isinstance(roi_override, dict):
             sub_env = os.environ.get("GW_INV_SUBROI", "").strip()
             if sub_env and self.search_roi is None:  # don't override explicit manual ROI
@@ -107,8 +160,9 @@ class VisionController:
                     pass
         if isinstance(roi_override, dict):
             base_region = {k: int(roi_override[k]) for k in ("left", "top", "width", "height") if k in roi_override}
+
+        # Candidate regions: small window around last known pos, then base region
         regions = []
-        # If we have a last known position, search a small ROI around it first
         lp = getattr(self, "_last_pos", None)
         if lp is not None:
             cx, cy = int(lp[0]), int(lp[1])
@@ -122,24 +176,25 @@ class VisionController:
                 regions.append({"left": int(roi_left), "top": int(roi_top), "width": int(roi_w), "height": int(roi_h)})
         regions.append(base_region)
 
+        # Load template
         template_gray = cv2.imread(template_path, cv2.IMREAD_GRAYSCALE)
         if template_gray is None:
             raise FileNotFoundError(f"Template image not found: {template_path}")
         tpl_h, tpl_w = template_gray.shape[:2]
 
-        # Try each region with a fast pass first, then a broader fallback if needed
-        fast_scales = [0.90, 0.95, 1.00, 1.05, 1.10]
-        full_scales = [round(0.55 + 0.05 * i, 2) for i in range(23)]  # 0.55..1.65
+        fast_scales = FAST_SCALES
+        full_scales = FULL_SCALES
         fast_scales_n = len(fast_scales)
         slow_scales_n = len(full_scales)
-        fast_only = (os.environ.get("GW_VISION_FAST_ONLY", "0") == "1")
+        fast_only = FAST_ONLY
+
         best_overall = -1.0
         best_overall_region = None
         best_overall_meta = None
-        logger = logging.getLogger(__name__)
-        perf_enabled = (os.environ.get("GW_VISION_PERF", "0") == "1") or logger.isEnabledFor(logging.DEBUG)
+
+        perf_enabled = PERF_ENABLED or logger.isEnabledFor(logging.DEBUG)
         t_call0 = time.perf_counter()
-        perf_regions = []
+
         for region in regions:
             t_grab0 = time.perf_counter()
             grab = np.array(self._safe_grab(region))  # BGRA
@@ -148,20 +203,25 @@ class VisionController:
             t_gray1 = time.perf_counter()
             std_val = float(screenshot_gray.std())
             # Skip likely-black frames (exclusive fullscreen)
-            if std_val < 1.0:
+            if std_val < BLACK_STD_SKIP:
                 if perf_enabled:
-                    perf_regions.append({
-                        "region": dict(region),
-                        "grab_ms": (t_grab1 - t_grab0) * 1000.0,
-                        "gray_ms": (t_gray1 - t_grab1) * 1000.0,
-                        "skipped_black": True,
-                        "std": float(std_val),
-                    })
-                logger.debug("vision: skipped region %s due to near-black frame (std=%.3f)", str(region), float(std_val))
+                    # Keep minimal perf info when skipping
+                    try:
+                        self._last_perf = {
+                            "grab_ms": (t_grab1 - t_grab0) * 1000.0,
+                            "gray_ms": (t_gray1 - t_grab1) * 1000.0,
+                            "skipped_black": True,
+                            "std": std_val,
+                            "region": dict(region),
+                        }
+                    except Exception:
+                        pass
+                logger.debug("vision: skipped region %s due to near-black frame (std=%.3f)", str(region), std_val)
                 continue
+
             # Fast pass: few scales, emphasize illumination-invariant modes
             t_fast0 = time.perf_counter()
-            best_score, best_loc, best_wh, meta = self._best_match_multi(
+            best_score, best_loc, best_wh, meta = best_match_multi(
                 screenshot_gray,
                 template_gray,
                 fast_scales,
@@ -169,6 +229,7 @@ class VisionController:
             )
             t_fast1 = time.perf_counter()
             logger.debug("vision: fast pass best_score=%.3f meta=%s", float(best_score), str(meta))
+
             if best_score >= confidence and best_loc is not None and best_wh is not None:
                 t_width, t_height = best_wh
                 center_x = int(best_loc[0] + t_width // 2 + int(region["left"]))
@@ -197,6 +258,7 @@ class VisionController:
                     except Exception:
                         self._last_perf = {"total_ms": (t_call1 - t_call0) * 1000.0, "phase": "fast"}
                 return center_x, center_y
+
             if best_score > best_overall:
                 best_overall = best_score
                 best_overall_region = region
@@ -205,7 +267,7 @@ class VisionController:
             # Slow fallback: full scales and broader methods (skip if fast-only mode is enabled)
             if not fast_only:
                 t_slow0 = time.perf_counter()
-                slow_score, slow_loc, slow_wh, slow_meta = self._best_match_multi(
+                slow_score, slow_loc, slow_wh, slow_meta = best_match_multi(
                     screenshot_gray,
                     template_gray,
                     full_scales,
@@ -246,6 +308,7 @@ class VisionController:
                     best_overall = slow_score
                     best_overall_region = region
                     best_overall_meta = slow_meta
+
         # Save diagnostics for caller
         try:
             self._last_debug = {
@@ -266,7 +329,7 @@ class VisionController:
                     bgr = grab[:, :, :3]
                     # Downscale for manageable size
                     h, w, _ = bgr.shape
-                    scale = 640 / max(1, max(h, w))
+                    scale = ARTIFACT_MAX_DIM / max(1, max(h, w))
                     if scale < 1.0:
                         bgr = cv2.resize(bgr, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
                     cv2.imwrite(str(Path(art_dir) / "last_screenshot.png"), bgr)
@@ -282,7 +345,7 @@ class VisionController:
         except Exception:
             pass
 
-        if 'perf_enabled' in locals() and perf_enabled:
+        if PERF_ENABLED or logger.isEnabledFor(logging.DEBUG):
             t_call1 = time.perf_counter()
             try:
                 self._last_perf = {
@@ -302,9 +365,7 @@ class VisionController:
         logger.info("vision: no match. best_score=%.3f meta=%s region=%s", float(best_overall), str(best_overall_meta), str(best_overall_region))
         return None
 
-    def find_server_template_enhanced(
-        self, template_path: str, confidence: float = 0.8
-    ) -> Optional[Tuple[int, int]]:
+    def find_server_template_enhanced(self, template_path: str, confidence: float = 0.8) -> Optional[Tuple[int, int]]:
         """Enhanced server detection with masking and multiscale search.
 
         Specifically designed for click_server and click_server2 templates to handle:
@@ -347,7 +408,7 @@ class VisionController:
             raise FileNotFoundError(f"Template image not found: {template_path}")
 
         # Default multiscale range; can be extended downwards dynamically if template doesn't fit
-        scales = [round(0.8 + 0.05 * i, 2) for i in range(9)]  # 0.8..1.2
+        scales = list(SERVER_SCALES_DEFAULT)
         logger.debug("vision: server detection using scales: %s", scales)
 
         best_score = -1.0
@@ -365,7 +426,7 @@ class VisionController:
                 continue
 
             # Skip near-black frames (exclusive fullscreen)
-            if float(screenshot_gray.std()) < 1.0:
+            if float(screenshot_gray.std()) < BLACK_STD_SKIP:
                 logger.debug("vision: skipping near-black frame")
                 continue
 
@@ -394,7 +455,7 @@ class VisionController:
 
             for scale in scales:
                 try:
-                    scaled_template = self._resize_tpl(template_gray, scale)
+                    scaled_template = resize_tpl(template_gray, scale)
                     th, tw = scaled_template.shape[:2]
                     if th < 8 or tw < 8:
                         continue
@@ -408,7 +469,7 @@ class VisionController:
 
                     # Build mask for the scaled template to ignore central text area
                     try:
-                        base_mask = self._create_server_button_mask((th, tw))
+                        base_mask = create_server_button_mask((th, tw))
                         mask = np.ascontiguousarray(base_mask)
                     except Exception:
                         mask = None
@@ -481,217 +542,8 @@ class VisionController:
         return None
 
     def _create_server_button_mask(self, template_shape: Tuple[int, int]) -> np.ndarray:
-        """Create a mask for server button templates.
-
-        Masks out the center text area where dynamic content appears,
-        focusing on the button borders and background patterns which are more stable.
-
-        Can be configured via environment variables:
-        - GW_SERVER_MASK_LEFT: left margin (default 0.2)
-        - GW_SERVER_MASK_RIGHT: right margin (default 0.8)
-        - GW_SERVER_MASK_TOP: top margin (default 0.3)
-        - GW_SERVER_MASK_BOTTOM: bottom margin (default 0.7)
-        """
-        h, w = template_shape
-        mask = np.ones((h, w), dtype=np.uint8) * 255
-
-        # Get mask parameters from environment or use defaults
-        try:
-            left_pct = float(os.environ.get("GW_SERVER_MASK_LEFT", "0.2"))
-            right_pct = float(os.environ.get("GW_SERVER_MASK_RIGHT", "0.8"))
-            top_pct = float(os.environ.get("GW_SERVER_MASK_TOP", "0.3"))
-            bottom_pct = float(os.environ.get("GW_SERVER_MASK_BOTTOM", "0.7"))
-        except (ValueError, TypeError):
-            # Fallback to defaults if env vars are invalid
-            left_pct, right_pct, top_pct, bottom_pct = 0.2, 0.8, 0.3, 0.7
-
-        # Calculate mask boundaries
-        text_left = int(w * left_pct)
-        text_right = int(w * right_pct)
-        text_top = int(h * top_pct)
-        text_bottom = int(h * bottom_pct)
-
-        # Ensure valid bounds
-        text_left = max(0, min(text_left, w-1))
-        text_right = max(text_left + 1, min(text_right, w))
-        text_top = max(0, min(text_top, h-1))
-        text_bottom = max(text_top + 1, min(text_bottom, h))
-
-        # Set text area to 0 (ignored in matching)
-        mask[text_top:text_bottom, text_left:text_right] = 0
-
-        return mask
-
-    # -------------------------- Matching helpers (reduce CC) --------------------------
-    @staticmethod
-    def _edges(img: np.ndarray) -> np.ndarray:
-        try:
-            v = float(np.median(img))
-            lo = int(max(0, 0.66 * v))
-            hi = int(min(255, 1.33 * v))
-            return cv2.Canny(img, lo, hi)
-        except Exception:
-            return cv2.Canny(img, 50, 150)
-
-    def _screen_variants(self, gray: np.ndarray) -> dict:
-        """Return multiple illumination-invariant representations of the screen.
-
-        Includes:
-        - gray_blur: lightly denoised grayscale
-        - gray_eq: global histogram equalization
-        - gray_clahe: local contrast-limited equalization (robust to gamma/brightness)
-        - edges: Canny edges with adaptive thresholds
-        - grad: gradient magnitude (Sobel), resilient to color/gamma shifts
-        """
-        try:
-            blur = cv2.GaussianBlur(gray, (3, 3), 0)
-        except Exception:
-            blur = gray
-        try:
-            eq = cv2.equalizeHist(gray)
-        except Exception:
-            eq = gray
-        # CLAHE for local contrast (handle bright/dark HDR-like captures)
-        try:
-            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-            cla = clahe.apply(gray)
-        except Exception:
-            cla = eq
-        edges = self._edges(gray)
-        # Gradient magnitude (normalized to 8-bit)
-        try:
-            gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
-            gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
-            mag = cv2.magnitude(gx, gy)
-            mmin, mmax = float(mag.min()), float(mag.max())
-            if mmax > mmin:
-                grad = cv2.convertScaleAbs((mag - mmin) * (255.0 / (mmax - mmin)))
-            else:
-                grad = np.zeros_like(gray)
-        except Exception:
-            grad = edges
-        return {"gray_blur": blur, "gray_eq": eq, "gray_clahe": cla, "edges": edges, "grad": grad}
-
-    def _make_tile_mask(self, shape, left=0.08, right=0.08, top=0.22, bottom=0.18):
-        """Binary mask that keeps the inner area of an item tile (ignores digits/shield)."""
-        h, w = shape
-        mask = np.zeros((h, w), np.uint8)
-        x0 = int(w * left)
-        x1 = int(w * (1.0 - right))
-        y0 = int(h * top)
-        y1 = int(h * (1.0 - bottom))
-        if y1 > y0 and x1 > x0:
-            mask[y0:y1, x0:x1] = 255
-        return mask
-
-    def _apply_mask(self, img, mask):
-        try:
-            return cv2.bitwise_and(img, img, mask=mask)
-        except Exception:
-            return img
-
-    def _resize_tpl(self, tpl: np.ndarray, scale: float) -> np.ndarray:
-        h, w = tpl.shape
-        if abs(scale - 1.0) < 1e-6:
-            return tpl
-        nh, nw = max(8, int(h * scale)), max(8, int(w * scale))
-        return cv2.resize(tpl, (nw, nh), interpolation=cv2.INTER_AREA if scale < 1.0 else cv2.INTER_CUBIC)
-
-    def _tpl_variants(self, tpl: np.ndarray) -> dict:
-        """Create multiple template variants to match under diverse conditions.
-
-        Note: We keep an 'edges_center' variant masked for inventory tiles, but
-        we also expose CLAHE and gradient to improve robustness for icons like the star.
-        """
-        try:
-            blur = cv2.GaussianBlur(tpl, (3, 3), 0)
-        except Exception:
-            blur = tpl
-        try:
-            eq = cv2.equalizeHist(tpl)
-        except Exception:
-            eq = tpl
-        try:
-            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-            cla = clahe.apply(tpl)
-        except Exception:
-            cla = eq
-        edges = self._edges(tpl)
-        # Gradient magnitude
-        try:
-            gx = cv2.Sobel(tpl, cv2.CV_32F, 1, 0, ksize=3)
-            gy = cv2.Sobel(tpl, cv2.CV_32F, 0, 1, ksize=3)
-            mag = cv2.magnitude(gx, gy)
-            mmin, mmax = float(mag.min()), float(mag.max())
-            if mmax > mmin:
-                grad = cv2.convertScaleAbs((mag - mmin) * (255.0 / (mmax - mmin)))
-            else:
-                grad = edges
-        except Exception:
-            grad = edges
-        # Optional: center mask used for inventory tiles; harmless for others
-        try:
-            mask = self._make_tile_mask(tpl.shape)
-        except Exception:
-            mask = None
-        if mask is not None:
-            try:
-                edges_center = self._apply_mask(edges, mask)
-            except Exception:
-                edges_center = edges
-        else:
-            edges_center = edges
-        return {"gray_blur": blur, "gray_eq": eq, "gray_clahe": cla, "edges": edges, "edges_center": edges_center, "grad": grad}
-
-    def _match_methods(self, modes: list[str], screen_v: dict, tpl_v: dict, scale: float) -> tuple[float, Optional[tuple[int, int]], Optional[dict]]:
-        best_local_score = -1.0
-        best_local_loc = None
-        best_local_meta = None
-        for m in modes:
-            scr = screen_v.get("edges" if m == "edges_center" else m)
-            tp = tpl_v.get(m)
-            if scr is None or tp is None:
-                continue
-            try:
-                res = cv2.matchTemplate(scr, tp, cv2.TM_CCOEFF_NORMED)
-                _, sc, _, loc = cv2.minMaxLoc(res)
-                if sc > best_local_score:
-                    best_local_score = sc
-                    best_local_loc = loc
-                    best_local_meta = {"method": m, "scale": float(scale)}
-            except Exception:
-                continue
-        return best_local_score, best_local_loc, best_local_meta
-
-    def _best_match_multi(self, screenshot_gray: np.ndarray, template_gray: np.ndarray, scales: list[float], modes: list[str] | None = None):
-        """Return (score, loc, (w,h), meta) for best match across strategies and scales.
-
-        modes: list of methods to try among {"gray_blur", "gray_eq", "edges"}. If None, tries all.
-        """
-        if not modes:
-            modes = ["gray_blur", "gray_eq", "edges"]
-        screen_v = self._screen_variants(screenshot_gray)
-
-        best_score = -1.0
-        best_loc = None
-        best_wh = None
-        best_meta = None
-
-        for s in scales:
-            try:
-                tpl_scaled = self._resize_tpl(template_gray, s)
-                if tpl_scaled.shape[0] < 8 or tpl_scaled.shape[1] < 8:
-                    continue
-                tpl_v = self._tpl_variants(tpl_scaled)
-                sc, loc, meta = self._match_methods(modes, screen_v, tpl_v, s)
-                if sc > best_score and loc is not None:
-                    best_score = sc
-                    best_loc = loc
-                    best_wh = (tpl_scaled.shape[1], tpl_scaled.shape[0])
-                    best_meta = meta
-            except Exception:
-                continue
-        return best_score, best_loc, best_wh, (best_meta or {})
+        """Backward-compatible wrapper for tests; delegates to pure function."""
+        return create_server_button_mask(template_shape)
 
     def get_last_debug(self):
         try:
@@ -709,17 +561,17 @@ class VisionController:
     def calibrate_inventory_roi_from_search(self, search_template_path: str, min_conf: float = 0.75):
         """Locate the search bar robustly, derive inventory grid ROI, and store it.
 
-        Uses a multi-scale matcher (edges + gray variants) similar to find_template
-        so it works under 4K/UI scaling. Returns a region dict or None if not found.
+        Uses a multi-scale matcher similar to find_template so it works under
+        4K/UI scaling. Returns a region dict or None if not found.
         """
-        # Ensure thread-local MSS instance
+        logger = logging.getLogger(__name__)
         sct = self._get_sct()
         base_region = _ark_window_region() or sct.monitors[0]
         t0 = time.perf_counter()
         frame = np.array(self._safe_grab(base_region))  # BGRA
         t1 = time.perf_counter()
-        if (os.environ.get("GW_VISION_PERF", "0") == "1") or logging.getLogger(__name__).isEnabledFor(logging.DEBUG):
-            logging.getLogger(__name__).debug("vision: grab (calibrate) %.1fms region=%s", (t1 - t0) * 1000.0, str(base_region))
+        if PERF_ENABLED or logger.isEnabledFor(logging.DEBUG):
+            logger.debug("vision: grab (calibrate) %.1fms region=%s", (t1 - t0) * 1000.0, str(base_region))
 
         bgr = frame[:, :, :3]
         screenshot_gray = cv2.cvtColor(frame, cv2.COLOR_BGRA2GRAY)
@@ -727,22 +579,19 @@ class VisionController:
         if tpl_gray is None:
             raise FileNotFoundError(search_template_path)
 
-        # Full scale set for robust detection - but optimize for speed since we already found search bar
-        # Use fewer scales focused around the likely UI scale
-        if hasattr(self, 'ui_scale') and self.ui_scale and abs(self.ui_scale - 1.0) < 0.5:
-            # If UI scale is close to 1.0, use a focused set around that scale
-            base_scale = self.ui_scale
-            fast_scales = [round(base_scale + 0.05 * i, 2) for i in range(-2, 3)]  # ±0.1 around detected scale
-            logging.getLogger(__name__).debug("vision: calibrate using fast scales around %.2f: %s", base_scale, fast_scales)
+        # Focused scale set around detected UI scale if available, else broader fallback
+        if hasattr(self, "ui_scale") and self.ui_scale and abs(self.ui_scale - 1.0) < 0.5:
+            base_scale = float(self.ui_scale)
+            fast_scales = [round(base_scale + 0.05 * i, 2) for i in range(-2, 3)]
+            logger.debug("vision: calibrate using fast scales around %.2f: %s", base_scale, fast_scales)
         else:
-            # Fallback to broader range but still reduced from 23 to 11 scales
             fast_scales = [round(0.7 + 0.1 * i, 2) for i in range(11)]  # 0.7..1.7 in 0.1 steps
-            logging.getLogger(__name__).debug("vision: calibrate using fallback scales: %s", fast_scales)
+            logger.debug("vision: calibrate using fallback scales: %s", fast_scales)
 
         cal_start = time.perf_counter()
-        score, loc, wh, _meta = self._best_match_multi(screenshot_gray, tpl_gray, fast_scales)
+        score, loc, wh, _meta = best_match_multi(screenshot_gray, tpl_gray, fast_scales)
         cal_time = (time.perf_counter() - cal_start) * 1000.0
-        logging.getLogger(__name__).info("vision: calibrate_roi matching took %.1fms with %d scales", cal_time, len(fast_scales))
+        logger.info("vision: calibrate_roi matching took %.1fms with %d scales", cal_time, len(fast_scales))
         if score < float(min_conf) or loc is None or wh is None:
             return None
 
@@ -760,14 +609,13 @@ class VisionController:
         w, h = int(wh[0]), int(wh[1])
         rect_rel = (x, y, w, h)
 
-        # 2) derive ROI within the same frame, then convert to absolute coords
+        # Derive ROI within the same frame, then convert to absolute coords
         l_rel, t_rel, r_rel, b_rel = self._derive_inventory_roi_from_search(bgr, rect_rel)
         left_abs = int(base_region["left"]) + int(l_rel)
         top_abs = int(base_region["top"]) + int(t_rel)
         right_abs = int(base_region["left"]) + int(r_rel)
         bottom_abs = int(base_region["top"]) + int(b_rel)
         roi = {"left": left_abs, "top": top_abs, "width": max(0, right_abs - left_abs), "height": max(0, bottom_abs - top_abs)}
-        # Sanity guard: avoid setting fullscreen as inventory ROI
         try:
             if roi.get("width", 0) <= 0 or roi.get("height", 0) <= 0:
                 return None
@@ -778,6 +626,7 @@ class VisionController:
 
     def grab_inventory_bgr(self):
         """Grab and return (BGR, region) for the inventory ROI when available, else Ark/window."""
+        logger = logging.getLogger(__name__)
         sct = self._get_sct()
         roi = getattr(self, "inventory_roi", None)
         region = roi if isinstance(roi, dict) else (_ark_window_region() or sct.monitors[0])
@@ -804,8 +653,8 @@ class VisionController:
         t0 = time.perf_counter()
         frame = np.array(self._safe_grab(region))  # BGRA
         t1 = time.perf_counter()
-        if (os.environ.get("GW_VISION_PERF", "0") == "1") or logging.getLogger(__name__).isEnabledFor(logging.DEBUG):
-            logging.getLogger(__name__).debug("vision: grab (inventory) %.1fms region=%s", (t1 - t0) * 1000.0, str(region))
+        if PERF_ENABLED or logger.isEnabledFor(logging.DEBUG):
+            logger.debug("vision: grab (inventory) %.1fms region=%s", (t1 - t0) * 1000.0, str(region))
         return frame[:, :, :3], region
 
     def match_item_in_inventory(self, roi_bgr: np.ndarray, template_path: str) -> tuple[bool, tuple[int, int], float]:
@@ -827,17 +676,17 @@ class VisionController:
                 interpolation=cv2.INTER_AREA if s < 1.0 else cv2.INTER_CUBIC,
             )
         # edges + center mask (ignore digits/shield/borders)
-        edges_tpl = self._edges(tpl)
-        mask = self._make_tile_mask(edges_tpl.shape)
-        edges_tpl = self._apply_mask(edges_tpl, mask)
+        edges_tpl = edges(tpl)
+        mask = make_tile_mask(edges_tpl.shape)
+        edges_tpl = apply_mask(edges_tpl, mask)
         gray = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2GRAY)
-        edges_roi = self._edges(gray)
+        edges_roi = edges(gray)
         scr = np.ascontiguousarray(edges_roi)
         tp = np.ascontiguousarray(edges_tpl)
         # fast, single-scale match
         res = cv2.matchTemplate(scr, tp, cv2.TM_CCOEFF_NORMED)
         _, score, _, loc = cv2.minMaxLoc(res)
-        return (float(score) >= 0.86), (int(loc[0]), int(loc[1])), float(score)
+        return (float(score) >= float(INVENTORY_ITEM_THRESHOLD)), (int(loc[0]), int(loc[1])), float(score)
 
     def set_search_roi(self, region: Optional[dict]):
         """Set an absolute screen-space ROI dict {left, top, width, height} to restrict searches."""
@@ -858,10 +707,10 @@ class VisionController:
         inv = getattr(self, "inventory_roi", None)
         if not isinstance(inv, dict):
             raise RuntimeError("inventory_roi not set; run calibrate_inventory_roi_from_search first")
-        L = int(inv["left"])
-        T = int(inv["top"])
-        W = int(inv["width"])
-        H = int(inv["height"])
+        L = int(inv["left"]) 
+        T = int(inv["top"]) 
+        W = int(inv["width"]) 
+        H = int(inv["height"]) 
         rl = max(0.0, min(1.0, float(rel_left)))
         rt = max(0.0, min(1.0, float(rel_top)))
         rw = max(0.0, min(1.0, float(rel_width)))
@@ -898,7 +747,6 @@ class VisionController:
         band_left = max(0, x - int(0.6 * w))
         band_right = min(width, x + int(3.8 * w))
         if band_bot <= band_top or band_right <= band_left:
-            # Degenerate band, fallback directly
             return self._fallback_roi_from_bar((x, y, w, h), width, height)
         band = full_bgr[band_top:band_bot, band_left:band_right]
 
@@ -939,61 +787,3 @@ class VisionController:
         left_abs, top_abs = max(0, left_abs), max(0, top_abs)
         right_abs, bottom_abs = min(width, right_abs), min(height, bottom_abs)
         return left_abs, top_abs, right_abs, bottom_abs
-
-
-# ----------------------- Windows helpers for Ark window -----------------------
-if os.name == "nt":
-    from ctypes import wintypes
-
-    user32 = ctypes.windll.user32
-    kernel32 = ctypes.windll.kernel32
-
-    class RECT(ctypes.Structure):
-        _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long), ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
-
-    def _foreground_executable_name_lower() -> str:
-        try:
-            hwnd = user32.GetForegroundWindow()
-            if not hwnd:
-                return ""
-            pid = wintypes.DWORD()
-            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-            hproc = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid.value)
-            if not hproc:
-                return ""
-            try:
-                buf_len = wintypes.DWORD(260)
-                while True:
-                    buf = ctypes.create_unicode_buffer(buf_len.value)
-                    ok = kernel32.QueryFullProcessImageNameW(hproc, 0, buf, ctypes.byref(buf_len))
-                    if ok:
-                        return os.path.basename(buf.value or "").lower()
-                    needed = buf_len.value
-                    if needed <= len(buf):
-                        break
-                    buf_len = wintypes.DWORD(needed)
-                return ""
-            finally:
-                kernel32.CloseHandle(hproc)
-        except Exception:
-            return ""
-
-    def _ark_window_region() -> Optional[dict]:
-        try:
-            if _foreground_executable_name_lower() != "arkascended.exe":
-                return None
-            hwnd = user32.GetForegroundWindow()
-            rc = RECT()
-            if not user32.GetWindowRect(hwnd, ctypes.byref(rc)):
-                return None
-            left, top = int(rc.left), int(rc.top)
-            width, height = int(rc.right - rc.left), int(rc.bottom - rc.top)
-            if width <= 0 or height <= 0:
-                return None
-            return {"left": left, "top": top, "width": width, "height": height}
-        except Exception:
-            return None
-else:
-    def _ark_window_region() -> Optional[dict]:
-        return None

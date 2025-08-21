@@ -84,14 +84,26 @@ class InputController:
             xi, yi = int(x), int(y)
         except Exception:
             xi, yi = x, y
+
+        # Debug: Log mouse movement attempt
+        current_x, current_y = self._get_mouse_pos()
+        logger.info("mouse: attempting move from (%s,%s) to (%d,%d)", current_x, current_y, xi, yi)
+
         try:
             pydirectinput.moveTo(xi, yi)
+            logger.info("mouse: pydirectinput.moveTo completed")
         except Exception as e:
             logger.exception("mouse: moveTo failed: %s", e)
             # Best-effort fallback
+            logger.info("mouse: trying SetCursorPos fallback")
             self._set_cursor_win32(xi, yi)
             return
         self._sleep(0.002)  # Reduced from 20ms to 2ms for speed
+
+        # Debug: Check final position
+        final_x, final_y = self._get_mouse_pos()
+        logger.info("mouse: final position (%s,%s)", final_x, final_y)
+
         self._ensure_position(xi, yi, tol=2)
 
     def click(self):
@@ -115,7 +127,12 @@ class InputController:
             presses: Number of clicks.
             interval: Delay between clicks.
         """
+        logger = logging.getLogger(__name__)
         btn = (button or "").lower()
+
+        # Debug: Log click attempt
+        current_x, current_y = self._get_mouse_pos()
+        logger.info("mouse: attempting click %s button %d times at position (%s,%s)", btn, presses, current_x, current_y)
 
         def _loop(n: int, fn):
             for _ in range(max(1, int(n))):
@@ -172,19 +189,25 @@ class InputController:
 
         # Try in order: extended buttons via Win32, standard L/R/M via Win32, PDI-specific, then fallback left
         if _click_win32_xbutton():
+            logger.info("mouse: click completed via Win32 xbutton")
             return
         if _click_win32_standard():
+            logger.info("mouse: click completed via Win32 standard")
             return
         if _click_pdi_specific():
+            logger.info("mouse: click completed via pydirectinput")
             return
         # Last resort: attempt left-click via PDI (and native left if PDI fails inside loop)
         try:
             _fallback_left()
+            logger.info("mouse: click completed via fallback left")
         except Exception:
             if sys.platform == "win32" and _user32 is not None:
                 try:
                     _loop(presses, lambda: (_user32.mouse_event(0x0002, 0, 0, 0, 0), _user32.mouse_event(0x0004, 0, 0, 0, 0)))
+                    logger.info("mouse: click completed via Win32 fallback")
                 except Exception:
+                    logger.warning("mouse: all click methods failed")
                     pass
 
     def mouse_down(self, button: str = 'left'):

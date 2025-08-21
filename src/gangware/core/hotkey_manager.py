@@ -10,7 +10,7 @@ This implementation provides:
   and press F8 to capture a small image region saved as a template. The path is
   stored under `search_bar_template`.
 - Global hotkey handling (RegisterHotKey + polling fallbacks):
-  - Global: F1 toggles overlay, F7 recalibration, F10 exit
+  - Global: F1 toggles overlay, F7 starts/captures calibration, F9 stops calibration, F10 exit
   - In-game only: F2, F3, F4, Shift+Q, Shift+E, Shift+R
     (Only enqueue tasks when ArkAscended.exe is the active window)
 
@@ -44,6 +44,9 @@ if sys.platform == "win32":
 
     class POINT(ctypes.Structure):
         _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+    class RECT(ctypes.Structure):
+        _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long), ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
 
     def _cursor_pos() -> Tuple[int, int]:
         pt = POINT()
@@ -164,8 +167,25 @@ class HotkeyManager(threading.Thread):
                 # Overlay recalibration (F7 or button) should trigger the flow
                 if hasattr(self.overlay, "on_recalibrate"):
                     self.overlay.on_recalibrate(self.request_recalibration)
+                # SIM calibration wiring (F7-driven while active)
+                if hasattr(self.overlay, "on_sim_cal_start"):
+                    self.overlay.on_sim_cal_start(self.start_sim_calibration)
+                if hasattr(self.overlay, "on_sim_cal_cancel"):
+                    self.overlay.on_sim_cal_cancel(self.cancel_sim_calibration)
         except Exception:
             pass
+        # SIM calibration state
+        self._sim_cal_active = False
+        self._sim_cal_idx = 0
+        self._sim_cal_targets = [
+            ("press_start", "PRESS START"),
+            ("join_game", "JOIN GAME"),
+            ("search_box", "SEARCH field"),
+            ("server_join", "SERVER JOIN"),
+        ]
+        self._sim_cal_points = {}
+        self._sim_cal_pts_stream: list[tuple[float, float]] = []
+        self._sim_cal_last_f7_ts: float = 0.0
         # Log system environment on startup for troubleshooting
         self._log_system_environment()
 
@@ -282,6 +302,208 @@ class HotkeyManager(threading.Thread):
                 logger.info("startup: absolute_roi=%s", abs_roi)
         except Exception:
             pass    # --------------------------- Thread entry ----------------------------
+
+    # --------------------------- SIM calibration helpers ----------------------------
+    def start_sim_calibration(self) -> None:
+        self._sim_cal_active = True
+        self._sim_cal_idx = 0
+        self._sim_cal_points = {}
+        self._sim_cal_pts_stream = []
+        self._sim_cal_last_f7_ts = 0.0
+        # Hide overlay to allow Ark to be foreground while capturing
+        try:
+            if self.overlay and hasattr(self.overlay, 'set_visible'):
+                self.overlay.set_visible(False)
+        except Exception:
+            pass
+        try:
+            logging.getLogger(__name__).info("sim_cal: calibration mode started - press F7 to capture coordinates, F9 to stop")
+        except Exception:
+            pass
+
+    def cancel_sim_calibration(self) -> None:
+        self._sim_cal_active = False
+        self._sim_cal_idx = 0
+        self._sim_cal_points = {}
+        self._sim_cal_pts_stream = []
+        self._sim_cal_last_f7_ts = 0.0
+        # Show overlay back
+        try:
+            if self.overlay and hasattr(self.overlay, 'set_visible'):
+                self.overlay.set_visible(True)
+            if self.overlay and hasattr(self.overlay, 'set_status'):
+                self.overlay.set_status("SIM Calibration cancelled.")
+        except Exception:
+            pass
+
+    def _sim_cal_capture_step(self) -> None:
+        # Get cursor pos
+        try:
+            x, y = _cursor_pos()
+        except Exception:
+            return
+        # Prefer Ark window rect by title substring (case-insensitive)
+        rect = self._get_ark_window_rect_by_proc() or self._get_ark_window_rect_by_title() or self._get_virtual_screen_rect()
+        if not rect:
+            try:
+                logging.getLogger(__name__).warning("sim_cal: no window rect available; capture ignored")
+            except Exception:
+                pass
+            return
+        L, T, R, B = rect
+        W = max(1, R - L)
+        H = max(1, B - T)
+        nx = max(0.0, min(1.0, float(x - L) / float(W)))
+        ny = max(0.0, min(1.0, float(y - T) / float(H)))
+
+        # Just log the coordinates - don't save automatically
+        try:
+            logging.getLogger(__name__).info("sim_cal: captured norm=(%.6f,%.6f) abs=(%d,%d) rect=(%d,%d,%d,%d)", nx, ny, x, y, L, T, R, B)
+        except Exception:
+            pass
+
+    def _save_sim_calibration(self) -> None:
+        try:
+            # Map first four points to named targets for quick fallback use
+            for i, (key, _label) in enumerate(self._sim_cal_targets):
+                if i < len(self._sim_cal_pts_stream):
+                    nx, ny = self._sim_cal_pts_stream[i]
+                    self.config_manager.config["DEFAULT"][f"sim_{key}_norm"] = f"{nx:.6f},{ny:.6f}"
+                    # Also persist absolute form for diagnostics if needed later
+                    self.config_manager.config["DEFAULT"][f"sim_{key}_abs"] = f"{int(nx*1000000)},{int(ny*1000000)}"  # placeholder for diagn.
+            # Persist full stream as semicolon-separated list
+            pts_str = ";".join(f"{nx:.6f},{ny:.6f}" for nx, ny in self._sim_cal_pts_stream)
+            self.config_manager.config["DEFAULT"]["sim_points"] = pts_str
+            self.config_manager.config["DEFAULT"]["sim_points_count"] = str(len(self._sim_cal_pts_stream))
+            import time as _t
+            ts = int(_t.time())
+            self.config_manager.config["DEFAULT"]["sim_calibrated_at"] = str(ts)
+            self.config_manager.save()
+            try:
+                logging.getLogger(__name__).info(
+                    "sim_cal: saved timestamp=%d count=%d points=%s",
+                    ts,
+                    len(self._sim_cal_pts_stream),
+                    pts_str[:512]
+                )
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    def _get_foreground_rect(self) -> tuple[int, int, int, int] | None:
+        try:
+            hwnd = user32.GetForegroundWindow()
+            if not hwnd:
+                return None
+            rc = RECT()
+            if not user32.GetWindowRect(hwnd, ctypes.byref(rc)):
+                return None
+            return int(rc.left), int(rc.top), int(rc.right), int(rc.bottom)
+        except Exception:
+            return None
+
+    def _get_virtual_screen_rect(self) -> tuple[int, int, int, int] | None:
+        try:
+            import mss
+            with mss.mss() as sct:
+                vb = sct.monitors[0]
+                L = int(vb['left']); T = int(vb['top'])
+                R = L + int(vb['width']); B = T + int(vb['height'])
+                return L, T, R, B
+        except Exception:
+            return None
+
+    def _get_ark_window_rect_by_proc(self) -> tuple[int, int, int, int] | None:
+        """Find Ark window by enumerating windows and matching the process image name.
+
+        Returns the window rect even if Ark is not the foreground window.
+        """
+        try:
+            target_exe = "arkascended.exe"
+            found_hwnd = ctypes.wintypes.HWND()
+
+            @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.wintypes.HWND, ctypes.wintypes.LPARAM)
+            def _enum_proc(hwnd, lparam):
+                try:
+                    # Skip invisible/minimized windows
+                    if not user32.IsWindowVisible(hwnd):
+                        return True
+                    pid = ctypes.wintypes.DWORD()
+                    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+                    hproc = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid.value)
+                    if not hproc:
+                        return True
+                    try:
+                        buf_len = ctypes.wintypes.DWORD(260)
+                        while True:
+                            buf = ctypes.create_unicode_buffer(buf_len.value)
+                            ok = kernel32.QueryFullProcessImageNameW(hproc, 0, buf, ctypes.byref(buf_len))
+                            if ok:
+                                exe = os.path.basename(buf.value or "").lower()
+                                if exe == target_exe:
+                                    found_hwnd.value = hwnd
+                                    return False
+                                break
+                            needed = buf_len.value
+                            if needed <= len(buf):
+                                break
+                            buf_len = ctypes.wintypes.DWORD(needed)
+                    finally:
+                        kernel32.CloseHandle(hproc)
+                except Exception:
+                    return True
+                return True
+
+            user32.EnumWindows(_enum_proc, 0)
+            if not found_hwnd.value:
+                return None
+            rc = RECT()
+            if not user32.GetWindowRect(found_hwnd, ctypes.byref(rc)):
+                return None
+            return int(rc.left), int(rc.top), int(rc.right), int(rc.bottom)
+        except Exception:
+            return None
+
+    def _get_ark_window_rect_by_title(self) -> tuple[int, int, int, int] | None:
+        """Find Ark window by title substring (case-insensitive) and return its rect."""
+        try:
+            target = "arkascended"
+            found_hwnd = ctypes.wintypes.HWND()
+
+            @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.wintypes.HWND, ctypes.wintypes.LPARAM)
+            def _enum_proc(hwnd, lparam):
+                # Skip invisible windows
+                try:
+                    if not user32.IsWindowVisible(hwnd):
+                        return True
+                except Exception:
+                    pass
+                # Get title
+                try:
+                    length = user32.GetWindowTextLengthW(hwnd)
+                    if length <= 0:
+                        return True
+                    buf = ctypes.create_unicode_buffer(length + 1)
+                    user32.GetWindowTextW(hwnd, buf, length + 1)
+                    title = (buf.value or "").lower()
+                except Exception:
+                    title = ""
+                if target in title:
+                    found_hwnd.value = hwnd
+                    return False  # stop enumeration
+                return True
+
+            user32.EnumWindows(_enum_proc, 0)
+            if not found_hwnd.value:
+                return None
+            rc = RECT()
+            if not user32.GetWindowRect(found_hwnd, ctypes.byref(rc)):
+                return None
+            return int(rc.left), int(rc.top), int(rc.right), int(rc.bottom)
+        except Exception:
+            return None
     def run(self):
         """Main loop for hotkey management with reduced branching."""
         self._ensure_calibrated()
@@ -353,6 +575,9 @@ class HotkeyManager(threading.Thread):
             pass
 
     def _update_f7_state(self, is_down_f7: bool, set_gate: bool) -> None:
+        # When SIM calibration is active, F7 should not trigger overlay recalibration UI
+        if getattr(self, "_sim_cal_active", False):
+            return
         if is_down_f7 and not self._f7_down:
             self._f7_down = True
             if set_gate:
@@ -442,16 +667,18 @@ class HotkeyManager(threading.Thread):
         HK_S_E = 8
         HK_S_R = 9
         HK_F6 = 10
+        HK_F9 = 11
 
         # Modifiers / VKs
         MOD_NONE = 0x0000
         MOD_SHIFT = 0x0004
         VK_F1, VK_F2, VK_F3, VK_F4 = 0x70, 0x71, 0x72, 0x73
-        VK_F6, VK_F7, VK_F10 = 0x75, 0x76, 0x79
+        VK_F6, VK_F7, VK_F9, VK_F10 = 0x75, 0x76, 0x78, 0x79
         VK_Q, VK_E, VK_R = 0x51, 0x45, 0x52
 
         # Register global hotkeys via helper
         self._has_reg_f7 = self._reg_hotkey(HK_F7, MOD_NONE, VK_F7, "F7")
+        self._reg_hotkey(HK_F9, MOD_NONE, VK_F9, "F9")
         self._reg_hotkey(HK_F10, MOD_NONE, VK_F10, "F10")
         self._has_reg_f1 = self._reg_hotkey(HK_F1, MOD_NONE, VK_F1, "F1")
         # Manual ROI capture (global)
@@ -470,7 +697,7 @@ class HotkeyManager(threading.Thread):
 
         # Map IDs to handlers
         self._hotkey_handlers = self._build_hotkey_handlers(
-            HK_F1, HK_F7, HK_F10, HK_F2, HK_F3, HK_F4, HK_S_Q, HK_S_E, HK_S_R, HK_F6
+            HK_F1, HK_F7, HK_F9, HK_F10, HK_F2, HK_F3, HK_F4, HK_S_Q, HK_S_E, HK_S_R, HK_F6
         )
 
     def _reg_hotkey(self, id_: int, mod: int, vk: int, name: str) -> bool:
@@ -491,6 +718,7 @@ class HotkeyManager(threading.Thread):
         self,
         hk_f1: int,
         hk_f7: int,
+        hk_f9: int,
         hk_f10: int,
         hk_f2: int,
         hk_f3: int,
@@ -503,6 +731,7 @@ class HotkeyManager(threading.Thread):
         return {
             hk_f1: self._on_hotkey_f1,
             hk_f7: self._on_hotkey_f7,
+            hk_f9: self._on_hotkey_f9,
             hk_f10: self._maybe_exit_on_f10,
             hk_f2: lambda: self._handle_macro_hotkey(self._task_equip_flak_fullset(), "F2"),
             hk_f3: lambda: self._handle_macro_hotkey(self._task_equip_tek_fullset(), "F3"),
@@ -517,7 +746,64 @@ class HotkeyManager(threading.Thread):
         self._toggle_overlay_visibility()
 
     def _on_hotkey_f7(self) -> None:
-        self._request_recalibration()
+        # If SIM calibration is active, capture coordinates (just log, don't save)
+        if getattr(self, "_sim_cal_active", False):
+            try:
+                self._sim_cal_capture_step()
+            except Exception:
+                pass
+            return
+
+        # Start calibration mode with single F7 press
+        try:
+            self._sim_cal_active = True
+            self._sim_cal_idx = 0
+            self._sim_cal_points = {}
+            self._sim_cal_pts_stream = []
+            self._sim_cal_last_f7_ts = 0.0
+            # Hide overlay during calibration
+            if self.overlay and hasattr(self.overlay, 'set_visible'):
+                self.overlay.set_visible(False)
+            # Log start message
+            import logging
+            logging.getLogger(__name__).info("sim_cal: calibration mode started - press F7 to capture coordinates, F9 to stop")
+        except Exception:
+            pass
+
+    def _on_hotkey_f9(self) -> None:
+        """Stop SIM calibration mode (F9).
+
+        Ends calibration session without saving any coordinates.
+        Only works when SIM calibration is active.
+        """
+        # Only works during active SIM calibration
+        if not getattr(self, "_sim_cal_active", False):
+            return
+
+        try:
+            # End calibration session without saving
+            self._sim_cal_active = False
+            self._sim_cal_last_f7_ts = 0.0
+
+            # Show overlay back and notify
+            if self.overlay and hasattr(self.overlay, 'set_visible'):
+                self.overlay.set_visible(True)
+            if self.overlay and hasattr(self.overlay, 'set_status'):
+                self.overlay.set_status("SIM Calibration mode stopped.")
+
+            # Log completion
+            import logging
+            logging.getLogger(__name__).info("sim_cal: calibration mode stopped via F9")
+        except Exception:
+            # Fallback: just end the calibration session
+            try:
+                self._sim_cal_active = False
+                if self.overlay and hasattr(self.overlay, 'set_visible'):
+                    self.overlay.set_visible(True)
+                if self.overlay and hasattr(self.overlay, 'set_status'):
+                    self.overlay.set_status("SIM Calibration mode stopped.")
+            except Exception:
+                pass
 
     def _on_hotkey_f6(self) -> None:
         """Two-press manual ROI capture (F6): first press stores top-left, second sets bottom-right.

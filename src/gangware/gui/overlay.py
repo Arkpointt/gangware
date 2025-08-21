@@ -5,7 +5,7 @@ from typing import Optional
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QMainWindow, QPushButton, QStackedWidget,
-    QGraphicsDropShadowEffect, QFrame, QScrollArea, QSizePolicy
+    QGraphicsDropShadowEffect, QFrame, QScrollArea, QSizePolicy, QLineEdit
 )
 from PyQt6.QtGui import QColor, QGuiApplication, QFontDatabase, QFont
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject
@@ -59,6 +59,11 @@ class OverlaySignals(QObject):
     capture_tek = pyqtSignal()
     capture_template = pyqtSignal()
     capture_roi = pyqtSignal()
+    # Auto Sim signals
+    sim_start = pyqtSignal(str)   # emits server code text
+    sim_stop = pyqtSignal()
+    sim_cal_start = pyqtSignal()  # begin SIM calibration flow (F7-driven)
+    sim_cal_cancel = pyqtSignal() # cancel SIM calibration flow
 
 
 class OverlayWindow(QMainWindow):
@@ -131,8 +136,10 @@ class OverlayWindow(QMainWindow):
         tabs.setSpacing(spx(8))
         self.btn_main_tab = self._nav_button("MAIN", True)
         self.btn_cal_tab = self._nav_button("CALIBRATION", False)
+        self.btn_sim_tab = self._nav_button("SIM", False)
         tabs.addWidget(self.btn_main_tab)
         tabs.addWidget(self.btn_cal_tab)
+        tabs.addWidget(self.btn_sim_tab)
         tabs.addStretch(1)
         root.addWidget(tabs_row)
 
@@ -140,8 +147,10 @@ class OverlayWindow(QMainWindow):
         self.stack = QStackedWidget()
         self.page_main = self._page_main()
         self.page_cal = self._page_calibration()
+        self.page_sim = self._page_sim()
         self.stack.addWidget(self.page_main)
         self.stack.addWidget(self.page_cal)
+        self.stack.addWidget(self.page_sim)
         root.addWidget(self.stack)
 
         # Footer
@@ -154,6 +163,7 @@ class OverlayWindow(QMainWindow):
         # Wire tab switching
         self.btn_main_tab.clicked.connect(lambda: self._switch_tab(0))
         self.btn_cal_tab.clicked.connect(lambda: self._switch_tab(1))
+        self.btn_sim_tab.clicked.connect(lambda: self._switch_tab(2))
 
         # Default page
         self._switch_tab(1 if calibration_mode else 0)
@@ -179,6 +189,10 @@ class OverlayWindow(QMainWindow):
         self.stack.setCurrentIndex(idx)
         self.btn_main_tab.setChecked(idx == 0)
         self.btn_cal_tab.setChecked(idx == 1)
+        try:
+            self.btn_sim_tab.setChecked(idx == 2)
+        except Exception:
+            pass
 
     def _page_main(self):
         page = QWidget()
@@ -272,6 +286,88 @@ class OverlayWindow(QMainWindow):
 
         # Fit calibration content without a scroll area
         return inner
+
+    def _page_sim(self):
+        """SIM page with server code input and Start/Stop controls."""
+        page = QWidget()
+        outer = QVBoxLayout(page)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(spx(14))
+
+        section = QFrame()
+        section.setObjectName("section")
+        glow(section, self.CYAN, 22, 70)
+        v = QVBoxLayout(section)
+        v.setContentsMargins(spx(12), spx(10), spx(12), spx(10))
+        v.setSpacing(spx(10))
+
+        t = QLabel("AUTO SIM")
+        t.setObjectName("sectionTitle")
+        glow(t, self.ORANGE, 18, 130)
+        v.addWidget(t)
+
+        row = QWidget()
+        h = QHBoxLayout(row)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(spx(10))
+
+        lbl = QLabel("Server code:")
+        lbl.setObjectName("item")
+        h.addWidget(lbl)
+
+        self.sim_input = QLineEdit()
+        try:
+            self.sim_input.setPlaceholderText("e.g. 2133")
+            self.sim_input.setMaxLength(12)
+        except Exception:
+            pass
+        self.sim_input.setObjectName("input")
+        h.addWidget(self.sim_input, 1)
+
+        btn_start = QPushButton("Start")
+        btn_start.setObjectName("smallBtn")
+        btn_start.setCursor(Qt.CursorShape.PointingHandCursor)
+        glow(btn_start, self.CYAN, 20, 100)
+        h.addWidget(btn_start)
+
+        btn_stop = QPushButton("Stop")
+        btn_stop.setObjectName("smallBtn")
+        btn_stop.setCursor(Qt.CursorShape.PointingHandCursor)
+        glow(btn_stop, self.CYAN, 20, 100)
+        h.addWidget(btn_stop)
+
+        v.addWidget(row)
+
+        # Calibration controls
+        row2 = QWidget()
+        h2 = QHBoxLayout(row2)
+        h2.setContentsMargins(0, 0, 0, 0)
+        h2.setSpacing(spx(10))
+        lbl2 = QLabel("SIM Calibration:")
+        lbl2.setObjectName("item")
+        h2.addWidget(lbl2)
+        btn_cal = QPushButton("Start (use F7)")
+        btn_cal.setObjectName("smallBtn")
+        btn_cal.setCursor(Qt.CursorShape.PointingHandCursor)
+        glow(btn_cal, self.CYAN, 20, 100)
+        h2.addWidget(btn_cal)
+        btn_cancel = QPushButton("Cancel")
+        btn_cancel.setObjectName("smallBtn")
+        btn_cancel.setCursor(Qt.CursorShape.PointingHandCursor)
+        glow(btn_cancel, self.CYAN, 20, 100)
+        h2.addWidget(btn_cancel)
+        h2.addStretch(1)
+        v.addWidget(row2)
+
+        outer.addWidget(section)
+
+        # Wire buttons
+        btn_start.clicked.connect(lambda: self._emit_sim_start())
+        btn_stop.clicked.connect(lambda: self._emit_sim_stop())
+        btn_cal.clicked.connect(lambda: self._emit_sim_cal_start())
+        btn_cancel.clicked.connect(lambda: self._emit_sim_cal_cancel())
+
+        return page
 
     # ------ Building blocks ------
     def _section(self, title: str, items: list[tuple[str, str]]):
@@ -458,6 +554,19 @@ class OverlayWindow(QMainWindow):
     def on_capture_roi(self, slot):
         self.signals.capture_roi.connect(slot)
 
+    # SIM wiring
+    def on_sim_start(self, slot):
+        self.signals.sim_start.connect(slot)
+
+    def on_sim_stop(self, slot):
+        self.signals.sim_stop.connect(slot)
+
+    def on_sim_cal_start(self, slot):
+        self.signals.sim_cal_start.connect(slot)
+
+    def on_sim_cal_cancel(self, slot):
+        self.signals.sim_cal_cancel.connect(slot)
+
     # For external callers to push results back into the UI
     def set_captured_inventory(self, token: str) -> None:
         box = self._cal_boxes.get("inventory")
@@ -572,6 +681,52 @@ class OverlayWindow(QMainWindow):
         """Toggle overlay visibility between shown and hidden."""
         try:
             self.setVisible(not self.isVisible())
+        except Exception:
+            pass
+
+    # ------ SIM helpers ------
+    def _emit_sim_start(self):
+        try:
+            code = self.sim_input.text().strip() if hasattr(self, 'sim_input') else ''
+        except Exception:
+            code = ''
+        # Immediate UI feedback for diagnostics
+        try:
+            self.set_status(f"SIM: Start clicked with code '{code or '?'}'")
+        except Exception:
+            pass
+        try:
+            self.signals.sim_start.emit(code)
+        except Exception:
+            pass
+
+    def _emit_sim_stop(self):
+        try:
+            self.set_status("SIM: Stop clicked")
+        except Exception:
+            pass
+        try:
+            self.signals.sim_stop.emit()
+        except Exception:
+            pass
+
+    def _emit_sim_cal_start(self):
+        try:
+            self.set_status("SIM F7 Capture: Press F7 to log coords; double-press F7 to finish. Cancel to abort.")
+        except Exception:
+            pass
+        try:
+            self.signals.sim_cal_start.emit()
+        except Exception:
+            pass
+
+    def _emit_sim_cal_cancel(self):
+        try:
+            self.set_status("SIM Calibration: cancelled.")
+        except Exception:
+            pass
+        try:
+            self.signals.sim_cal_cancel.emit()
         except Exception:
             pass
 

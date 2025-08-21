@@ -308,8 +308,12 @@ class HotkeyManager(threading.Thread):
         self._sim_cal_last_f7_ts = 0.0
         # Hide overlay to allow Ark to be foreground while capturing
         try:
-            if self.overlay and hasattr(self.overlay, 'set_visible'):
-                self.overlay.set_visible(False)
+            if self.overlay:
+                # Use thread-safe signal to avoid cross-thread GUI access
+                if hasattr(self.overlay, 'set_visible_safe'):
+                    self.overlay.set_visible_safe(False)
+                elif hasattr(self.overlay, 'set_visible'):
+                    self.overlay.set_visible(False)
         except Exception:
             pass
         try:
@@ -325,10 +329,15 @@ class HotkeyManager(threading.Thread):
         self._sim_cal_last_f7_ts = 0.0
         # Show overlay back
         try:
-            if self.overlay and hasattr(self.overlay, 'set_visible'):
-                self.overlay.set_visible(True)
-            if self.overlay and hasattr(self.overlay, 'set_status'):
-                self.overlay.set_status("SIM Calibration cancelled.")
+            if self.overlay:
+                if hasattr(self.overlay, 'set_visible_safe'):
+                    self.overlay.set_visible_safe(True)
+                elif hasattr(self.overlay, 'set_visible'):
+                    self.overlay.set_visible(True)
+                if hasattr(self.overlay, 'set_status_safe'):
+                    self.overlay.set_status_safe("SIM Calibration cancelled.")
+                elif hasattr(self.overlay, 'set_status'):
+                    self.overlay.set_status("SIM Calibration cancelled.")
         except Exception:
             pass
 
@@ -352,9 +361,18 @@ class HotkeyManager(threading.Thread):
         nx = max(0.0, min(1.0, float(x - L) / float(W)))
         ny = max(0.0, min(1.0, float(y - T) / float(H)))
 
-        # Just log the coordinates - don't save automatically
+        # Log the coordinates and record them in the stream
         try:
             logging.getLogger(__name__).info("sim_cal: captured norm=(%.6f,%.6f) abs=(%d,%d) rect=(%d,%d,%d,%d)", nx, ny, x, y, L, T, R, B)
+        except Exception:
+            pass
+
+        # Do not store points on F7; logging only for debugging
+
+        # Update last press timestamp (for potential diagnostics only)
+        try:
+            import time as _t
+            self._sim_cal_last_f7_ts = _t.perf_counter()
         except Exception:
             pass
 
@@ -404,8 +422,10 @@ class HotkeyManager(threading.Thread):
             import mss
             with mss.mss() as sct:
                 vb = sct.monitors[0]
-                L = int(vb['left']); T = int(vb['top'])
-                R = L + int(vb['width']); B = T + int(vb['height'])
+                L = int(vb['left'])
+                T = int(vb['top'])
+                R = L + int(vb['width'])
+                B = T + int(vb['height'])
                 return L, T, R, B
         except Exception:
             return None
@@ -756,12 +776,14 @@ class HotkeyManager(threading.Thread):
         HK_S_R = 9
         HK_F6 = 10
         HK_F9 = 11
+        HK_F11 = 12
 
         # Modifiers / VKs
         MOD_NONE = 0x0000
         MOD_SHIFT = 0x0004
         VK_F1, VK_F2, VK_F3, VK_F4 = 0x70, 0x71, 0x72, 0x73
         VK_F6, VK_F7, VK_F9, VK_F10 = 0x75, 0x76, 0x78, 0x79
+        VK_F11 = 0x7A
         VK_Q, VK_E, VK_R = 0x51, 0x45, 0x52
 
         # Register global hotkeys via helper
@@ -769,6 +791,8 @@ class HotkeyManager(threading.Thread):
         self._reg_hotkey(HK_F9, MOD_NONE, VK_F9, "F9")
         self._reg_hotkey(HK_F10, MOD_NONE, VK_F10, "F10")
         self._has_reg_f1 = self._reg_hotkey(HK_F1, MOD_NONE, VK_F1, "F1")
+        # Global Sim toggle
+        self._reg_hotkey(HK_F11, MOD_NONE, VK_F11, "F11")
         # Manual ROI capture (global)
         self._reg_hotkey(HK_F6, MOD_NONE, VK_F6, "F6")
 
@@ -785,7 +809,7 @@ class HotkeyManager(threading.Thread):
 
         # Map IDs to handlers
         self._hotkey_handlers = self._build_hotkey_handlers(
-            HK_F1, HK_F7, HK_F9, HK_F10, HK_F2, HK_F3, HK_F4, HK_S_Q, HK_S_E, HK_S_R, HK_F6
+            HK_F1, HK_F7, HK_F9, HK_F10, HK_F2, HK_F3, HK_F4, HK_S_Q, HK_S_E, HK_S_R, HK_F6, HK_F11
         )
 
     def _reg_hotkey(self, id_: int, mod: int, vk: int, name: str) -> bool:
@@ -815,6 +839,7 @@ class HotkeyManager(threading.Thread):
         hk_s_e: int,
         hk_s_r: int,
         hk_f6: int,
+        hk_f11: int,
     ) -> Dict[int, Callable[[], None]]:
         return {
             hk_f1: self._on_hotkey_f1,
@@ -828,6 +853,7 @@ class HotkeyManager(threading.Thread):
             hk_s_e: self._on_hotkey_shift_e,
             hk_s_r: self._on_hotkey_shift_r,
             hk_f6: self._on_hotkey_f6,
+            hk_f11: self._on_hotkey_f11,
         }
 
     def _on_hotkey_f1(self) -> None:
@@ -850,18 +876,64 @@ class HotkeyManager(threading.Thread):
             self._sim_cal_pts_stream = []
             self._sim_cal_last_f7_ts = 0.0
             # Hide overlay during calibration
-            if self.overlay and hasattr(self.overlay, 'set_visible'):
-                self.overlay.set_visible(False)
+            if self.overlay:
+                # Use thread-safe signal to avoid cross-thread GUI access from hotkey thread
+                if hasattr(self.overlay, 'set_visible_safe'):
+                    self.overlay.set_visible_safe(False)
+                elif hasattr(self.overlay, 'set_visible'):
+                    self.overlay.set_visible(False)
             # Log start message
             import logging
             logging.getLogger(__name__).info("sim_cal: calibration mode started - press F7 to capture coordinates, F9 to stop")
         except Exception:
             pass
 
+    def _on_hotkey_f11(self) -> None:
+        """Global toggle: Start/Stop Sim and hide/show overlay accordingly."""
+        try:
+            ov = self.overlay
+            if not ov:
+                return
+            running = False
+            if hasattr(ov, 'is_sim_running'):
+                try:
+                    running = bool(ov.is_sim_running())
+                except Exception:
+                    running = False
+            if running:
+                # Stop and show overlay
+                if hasattr(ov, 'request_sim_stop_hotkey'):
+                    ov.request_sim_stop_hotkey()
+                else:
+                    try:
+                        ov.set_status("SIM: Stop (F11)")
+                    except Exception:
+                        pass
+                    if hasattr(ov, 'signals') and hasattr(ov.signals, 'sim_stop'):
+                        ov.signals.sim_stop.emit()
+                    if hasattr(ov, 'set_visible_safe'):
+                        ov.set_visible_safe(True)
+            else:
+                # Start with current code and hide overlay
+                if hasattr(ov, 'request_sim_start_hotkey'):
+                    ov.request_sim_start_hotkey()
+                else:
+                    code = ''
+                    try:
+                        code = ov.sim_input.text().strip()
+                    except Exception:
+                        pass
+                    if hasattr(ov, 'signals') and hasattr(ov.signals, 'sim_start'):
+                        ov.signals.sim_start.emit(code)
+                    if hasattr(ov, 'set_visible_safe'):
+                        ov.set_visible_safe(False)
+        except Exception:
+            pass
+
     def _on_hotkey_f9(self) -> None:
         """Stop SIM calibration mode (F9).
 
-        Ends calibration session without saving any coordinates.
+        Finishes calibration and saves captured coordinates.
         Only works when SIM calibration is active.
         """
         # Only works during active SIM calibration
@@ -873,11 +945,17 @@ class HotkeyManager(threading.Thread):
             self._sim_cal_active = False
             self._sim_cal_last_f7_ts = 0.0
 
-            # Show overlay back and notify
-            if self.overlay and hasattr(self.overlay, 'set_visible'):
-                self.overlay.set_visible(True)
-            if self.overlay and hasattr(self.overlay, 'set_status'):
-                self.overlay.set_status("SIM Calibration mode stopped.")
+            # Show overlay back and notify (thread-safe)
+            if self.overlay:
+                if hasattr(self.overlay, 'set_visible_safe'):
+                    self.overlay.set_visible_safe(True)
+                elif hasattr(self.overlay, 'set_visible'):
+                    self.overlay.set_visible(True)
+                msg = "SIM Calibration mode stopped."
+                if hasattr(self.overlay, 'set_status_safe'):
+                    self.overlay.set_status_safe(msg)
+                elif hasattr(self.overlay, 'set_status'):
+                    self.overlay.set_status(msg)
 
             # Log completion
             import logging
@@ -886,10 +964,15 @@ class HotkeyManager(threading.Thread):
             # Fallback: just end the calibration session
             try:
                 self._sim_cal_active = False
-                if self.overlay and hasattr(self.overlay, 'set_visible'):
-                    self.overlay.set_visible(True)
-                if self.overlay and hasattr(self.overlay, 'set_status'):
-                    self.overlay.set_status("SIM Calibration mode stopped.")
+                if self.overlay:
+                    if hasattr(self.overlay, 'set_visible_safe'):
+                        self.overlay.set_visible_safe(True)
+                    elif hasattr(self.overlay, 'set_visible'):
+                        self.overlay.set_visible(True)
+                    if hasattr(self.overlay, 'set_status_safe'):
+                        self.overlay.set_status_safe("SIM Calibration mode stopped.")
+                    elif hasattr(self.overlay, 'set_status'):
+                        self.overlay.set_status("SIM Calibration mode stopped.")
             except Exception:
                 pass
 
@@ -1099,8 +1182,7 @@ class HotkeyManager(threading.Thread):
                 self.overlay.set_hotkey_line_active(self.HOTKEY_SHIFT_E)
         except Exception:
             pass
-        import time as _t
-        start_time = _t.perf_counter()
+        start_time = time.perf_counter()
         t = threading.Thread(target=self._hot_thread_loop, args=(start_time,), daemon=True)
         self._hot_thread = t
         try:
@@ -1109,7 +1191,6 @@ class HotkeyManager(threading.Thread):
             pass
 
     def _hot_thread_loop(self, start: float) -> None:
-        import time as _t
         total_duration = 22.5
         interval = 1.5
         presses = int(total_duration / interval) + 1
@@ -1757,7 +1838,10 @@ class HotkeyManager(threading.Thread):
                                 if isinstance(inv0, dict) and inv0.get('width', 0) > 0 and inv0.get('height', 0) > 0:
                                     inv_hint = inv0
                             if inv_hint is not None:
-                                L = int(inv_hint.get('left', 0)); T = int(inv_hint.get('top', 0)); W = int(inv_hint.get('width', 0)); H = int(inv_hint.get('height', 0))
+                                L = int(inv_hint.get('left', 0))
+                                T = int(inv_hint.get('top', 0))
+                                W = int(inv_hint.get('width', 0))
+                                H = int(inv_hint.get('height', 0))
                                 band_h = max(100, min(260, int(H * 0.40)))
                                 band_top = max(0, T - band_h - int(H * 0.05))
                                 band_left = max(0, L - int(W * 0.05))
@@ -2069,7 +2153,8 @@ class HotkeyManager(threading.Thread):
                             try:
                                 _pre_patch = None
                                 try:
-                                    yy0 = max(0, int(y)); xx0 = max(0, int(x))
+                                    yy0 = max(0, int(y))
+                                    xx0 = max(0, int(x))
                                     yy1 = min(int(y + h), roi_bgr.shape[0])
                                     xx1 = min(int(x + w), roi_bgr.shape[1])
                                     if yy1 > yy0 and xx1 > xx0:
@@ -2124,7 +2209,8 @@ class HotkeyManager(threading.Thread):
                                         pass
                                     roi_after, _ = vision_controller.grab_inventory_bgr()
                                     # Recompute patch bounds (accounting for possible minor shift)
-                                    yy0 = max(0, int(y)); xx0 = max(0, int(x))
+                                    yy0 = max(0, int(y))
+                                    xx0 = max(0, int(x))
                                     yy1 = min(int(y + h), roi_after.shape[0])
                                     xx1 = min(int(x + w), roi_after.shape[1])
                                     if yy1 <= yy0 or xx1 <= xx0:
@@ -2247,7 +2333,10 @@ class HotkeyManager(threading.Thread):
                                 if isinstance(inv0, dict) and inv0.get('width', 0) > 0 and inv0.get('height', 0) > 0:
                                     inv_hint = inv0
                             if inv_hint is not None:
-                                L = int(inv_hint.get('left', 0)); T = int(inv_hint.get('top', 0)); W = int(inv_hint.get('width', 0)); H = int(inv_hint.get('height', 0))
+                                L = int(inv_hint.get('left', 0))
+                                T = int(inv_hint.get('top', 0))
+                                W = int(inv_hint.get('width', 0))
+                                H = int(inv_hint.get('height', 0))
                                 band_h = max(100, min(260, int(H * 0.40)))
                                 band_top = max(0, T - band_h - int(H * 0.05))
                                 band_left = max(0, L - int(W * 0.05))
@@ -2331,8 +2420,10 @@ class HotkeyManager(threading.Thread):
                     if _abs_roi_env and isinstance(inv_roi, dict):
                         parts = [int(p.strip()) for p in _abs_roi_env.split(',')]
                         if len(parts) == 4:
-                            inv_left = int(inv_roi.get('left', 0)); inv_top = int(inv_roi.get('top', 0))
-                            inv_w = int(inv_roi.get('width', 0)); inv_h = int(inv_roi.get('height', 0))
+                            inv_left = int(inv_roi.get('left', 0))
+                            inv_top = int(inv_roi.get('top', 0))
+                            inv_w = int(inv_roi.get('width', 0))
+                            inv_h = int(inv_roi.get('height', 0))
                             abs_left, abs_top, abs_w, abs_h = parts
                             abs_right, abs_bottom = abs_left + abs_w, abs_top + abs_h
                             inv_right, inv_bottom = inv_left + inv_w, inv_top + inv_h
@@ -2543,7 +2634,10 @@ class HotkeyManager(threading.Thread):
                                     if isinstance(inv0, dict) and inv0.get('width', 0) > 0 and inv0.get('height', 0) > 0:
                                         inv_hint = inv0
                                 if inv_hint is not None:
-                                    L = int(inv_hint.get('left', 0)); T = int(inv_hint.get('top', 0)); W = int(inv_hint.get('width', 0)); H = int(inv_hint.get('height', 0))
+                                    L = int(inv_hint.get('left', 0))
+                                    T = int(inv_hint.get('top', 0))
+                                    W = int(inv_hint.get('width', 0))
+                                    H = int(inv_hint.get('height', 0))
                                     band_h = max(100, min(260, int(H * 0.40)))
                                     band_top = max(0, T - band_h - int(H * 0.05))
                                     band_left = max(0, L - int(W * 0.05))
@@ -2627,8 +2721,10 @@ class HotkeyManager(threading.Thread):
                     if _abs_roi_env and isinstance(inv_roi, dict):
                         parts = [int(p.strip()) for p in _abs_roi_env.split(',')]
                         if len(parts) == 4:
-                            inv_left = int(inv_roi.get('left', 0)); inv_top = int(inv_roi.get('top', 0))
-                            inv_w = int(inv_roi.get('width', 0)); inv_h = int(inv_roi.get('height', 0))
+                            inv_left = int(inv_roi.get('left', 0))
+                            inv_top = int(inv_roi.get('top', 0))
+                            inv_w = int(inv_roi.get('width', 0))
+                            inv_h = int(inv_roi.get('height', 0))
                             abs_left, abs_top, abs_w, abs_h = parts
                             abs_right, abs_bottom = abs_left + abs_w, abs_top + abs_h
                             inv_right, inv_bottom = inv_left + inv_w, inv_top + inv_h
@@ -2834,7 +2930,10 @@ class HotkeyManager(threading.Thread):
                                     if isinstance(inv0, dict) and inv0.get('width', 0) > 0 and inv0.get('height', 0) > 0:
                                         inv_hint = inv0
                                 if inv_hint is not None:
-                                    L = int(inv_hint.get('left', 0)); T = int(inv_hint.get('top', 0)); W = int(inv_hint.get('width', 0)); H = int(inv_hint.get('height', 0))
+                                    L = int(inv_hint.get('left', 0))
+                                    T = int(inv_hint.get('top', 0))
+                                    W = int(inv_hint.get('width', 0))
+                                    H = int(inv_hint.get('height', 0))
                                     band_h = max(100, min(260, int(H * 0.40)))
                                     band_top = max(0, T - band_h - int(H * 0.05))
                                     band_left = max(0, L - int(W * 0.05))
@@ -2917,8 +3016,10 @@ class HotkeyManager(threading.Thread):
                     if _abs_roi_env and isinstance(inv_roi, dict):
                         parts = [int(p.strip()) for p in _abs_roi_env.split(',')]
                         if len(parts) == 4:
-                            inv_left = int(inv_roi.get('left', 0)); inv_top = int(inv_roi.get('top', 0))
-                            inv_w = int(inv_roi.get('width', 0)); inv_h = int(inv_roi.get('height', 0))
+                            inv_left = int(inv_roi.get('left', 0))
+                            inv_top = int(inv_roi.get('top', 0))
+                            inv_w = int(inv_roi.get('width', 0))
+                            inv_h = int(inv_roi.get('height', 0))
                             abs_left, abs_top, abs_w, abs_h = parts
                             abs_right, abs_bottom = abs_left + abs_w, abs_top + abs_h
                             inv_right, inv_bottom = inv_left + inv_w, inv_top + inv_h

@@ -53,7 +53,13 @@ import random as _rand
 import ctypes
 import numpy as np
 import cv2
+import mss
 from ..vision.detectors import detect_header_bottom_abs
+# Optional OCR fallback (requires local Tesseract install). Safe to miss.
+try:
+    import pytesseract  # type: ignore
+except Exception:  # pragma: no cover - optional dependency
+    pytesseract = None  # type: ignore
 
 # Pure helper to detect header divider using controller capture + pure detector
 from typing import Optional as _Opt, Dict as _Dict, Tuple as _Tuple
@@ -99,8 +105,9 @@ class SimConfig:
     backoff_max: float = 0.5             # Reduced from 1.5 for speed
     # Require seeing the left-side star icon in the server row before accepting any server match
     require_star_for_server: bool = True
-    # Expected star position (normalized to Ark window) and narrow ROI margins for faster/safer detection
-    star_expected_x_norm: float = 0.085677
+    # Expected row-icon (BattleEye shield) position after search, normalized to Ark window.
+    # Replacing prior star icon; new capture from sim_cal logs: norm=(0.056250, 0.303241)
+    star_expected_x_norm: float = 0.056250
     star_expected_y_norm: float = 0.303241
     # Tight ROI around expected star — roughly a ~2" box equivalent (half-side ~1") on common DPIs
     # On 4K (3840x2160), 1" ~96px => ~0.025W, ~0.044H. Tune here if needed.
@@ -109,11 +116,19 @@ class SimConfig:
     # Star-only mode: treat any valid star hit as "server available" and click based on star offset.
     # This bypasses header gating and row-template confirmation for a simpler, faster path.
     star_only_mode: bool = True
-    # Normalized offset from star center to the desired click point on the row (relative to Ark window width/height)
-    # Default derived from current calibrated norms: click_server.x (0.531510) - star.x (~0.085677) ~= 0.445833
-    star_to_click_dx_norm: float = 0.445833
+    # Normalized offset from row icon center to the desired click point on the row (relative to Ark window width/height)
+    # Derived from calibrated norms: click_server.x (0.531510) - icon.x (0.056250) = 0.475260
+    star_to_click_dx_norm: float = 0.475260
     # Vertical offset from star to row click; typically near zero. Downward bias is applied later in click stage.
     star_to_click_dy_norm: float = 0.000000
+
+    # Precise join-failure text location (normalized to Ark window), used to target OCR.
+    # From sim_cal logs after clicking Join: norm=(0.462240, 0.337963)
+    failure_text_expected_x_norm: float = 0.462240
+    failure_text_expected_y_norm: float = 0.337963
+    # Size of OCR crop around the expected point (as a fraction of window size)
+    failure_text_roi_w_norm: float = 0.32  # ~32% of width centered on x
+    failure_text_roi_h_norm: float = 0.14  # ~14% of height centered on y
 
 
 class TemplateLibrary:
@@ -167,12 +182,14 @@ class TemplateLibrary:
             "click_server3": ("click_server3",),
             "click_server4": ("click_server4",),
             "click_server5": ("click_server5",),
-            # Row signature icons
-            # Include star_server_click explicitly (tight crop of the star icon) for robustness across backgrounds
-            "server_star": ("server_star", "star_server_click", "star", "row_star", "favorite_star"),
-            "server_star2": ("server_star2", "star2", "row_star2"),
-            "row_star": ("row_star", "star_server_click"),
-            "star_icon": ("star_server_click", "star_icon", "star"),
+            # Row signature icons (BattleEye shield replaces prior star icon)
+            # Map canonical star keys to battleye_symbol so existing logic picks it up transparently
+            "server_star": ("battleye_symbol", "server_star", "star_server_click", "star", "row_star", "favorite_star"),
+            "server_star2": ("battleye_symbol", "server_star2", "star2", "row_star2"),
+            "row_star": ("battleye_symbol", "row_star", "star_server_click"),
+            "star_icon": ("battleye_symbol", "star_server_click", "star_icon", "star"),
+            # Also expose a direct canonical key for future use
+            "battleye_symbol": ("battleye_symbol", "battleye", "battlEye_symbol"),
         }
 
     @staticmethod
@@ -711,23 +728,29 @@ class AutoSimRunner:
                                         continue
                                     star_hits += 1
                                     sx, sy = map(int, coords)
-                                    # Header gating - prefer detected divider; fallback to row-band top if divider isn't detected (blur/scale)
-                                    header_ok = (header_bottom_for_star is not None and sy > int(header_bottom_for_star))
-                                    # Fallback band-top based gate (mirrors the earlier server_row_band range ~27%+ of height)
+                                    # Header/band gating with tolerance to handle slight divider mis-detections
+                                    # Use vertical margin (my) or 6% of height as tolerance cap
+                                    tol_y = max(8, min(int(my), int(0.06 * height)))
+                                    # Prefer detected divider, but accept within tolerance below divider
+                                    header_ok = False
+                                    if header_bottom_for_star is not None:
+                                        header_ok = (sy >= int(header_bottom_for_star) - tol_y)
+                                    # Always compute band-top fallback with the same tolerance
                                     band_top_norm = 0.271  # keep in sync with server_row_band_applied
                                     band_top_abs = max(roi_top, top + int(height * band_top_norm))
-                                    band_ok = (header_bottom_for_star is None and sy > int(band_top_abs))
+                                    band_ok = (sy >= int(band_top_abs) - tol_y)
                                     header_or_band_ok = bool(header_ok or band_ok)
                                     # Proximity constraint: must be close to expected position
                                     prox_ok = (abs(sx - exp_x) <= mx and abs(sy - exp_y) <= my)
                                     # Left-edge constraint: use absolute expected band ± small tolerance
-                                    left_band_min = left + int(0.06 * width)  # 6%
-                                    left_band_max = left + int(0.13 * width) # 13%
+                                    # Accept icons roughly between 4% and 12% of window width
+                                    left_band_min = left + int(0.04 * width)  # 4%
+                                    left_band_max = left + int(0.12 * width) # 12%
                                     left_ok = (left_band_min <= sx <= left_band_max)
                                     self._log_info("star_candidate",
                                                   template=sname, coords=(sx, sy), conf=float(sc),
                                                   header_bottom=int(header_bottom_for_star) if header_bottom_for_star is not None else None,
-                                                  header_ok=bool(header_ok), band_top=int(band_top_abs), band_ok=bool(band_ok), geom_ok=bool(header_or_band_ok), prox_ok=bool(prox_ok), left_band=f"{left_band_min}-{left_band_max}", left_ok=bool(left_ok))
+                                                  header_ok=bool(header_ok), band_top=int(band_top_abs), band_ok=bool(band_ok), geom_ok=bool(header_or_band_ok), prox_ok=bool(prox_ok), left_band=f"{left_band_min}-{left_band_max}", left_ok=bool(left_ok), header_tol=tol_y)
                                     # In star-only mode we still require the geometric gates (header or band-top fallback)
                                     if getattr(self.cfg, 'star_only_mode', False) and not (header_or_band_ok and prox_ok and left_ok):
                                         reason = "header_and_band_failed" if not header_or_band_ok else ("proximity_failed" if not prox_ok else "left_band_failed")
@@ -1121,15 +1144,66 @@ class AutoSimRunner:
                     self._log_info("join_success")
                     break
                 elif join_result == "failure":
-                    # Handle failure: Fast ESC → back button → restart from join_game
-                    self._log_info("handling_join_failure_fast", message="Fast failure recovery with immediate ESC and back")
+                    # Handle failure quickly: dismiss dialog, go back, and restart join loop
+                    self._log_info("handling_join_failure_fast", message="Failure detected — ESC, dismiss, back, restart")
+                    # Ensure Ark is foreground to receive inputs
+                    try:
+                        if hasattr(self, '_ensure_ark_foreground'):
+                            self._ensure_ark_foreground(timeout=1.0)
+                    except Exception:
+                        pass
+
+                    # Try to dismiss any visible OK/error dialog first
+                    ok_dismissed = False
+                    try:
+                        if self.templates.exists("ok_button"):
+                            if self._click_tpl("ok_button", self.cfg.min_conf_buttons, timeout_s=0.3):
+                                ok_dismissed = True
+                                self._sleep(0.2)
+                                self._log_info("dismissed_ok_button")
+                    except Exception:
+                        pass
+
+                    # Send a quick ESC to back out if needed
                     self._press_esc()
-                    self._sleep(0.5)  # Updated to 0.5s
-                    if not self._click_calibrated("back"):
-                        self._press_esc()  # Fallback if back button fails
-                        self._sleep(0.2)
-                    self._sleep(0.5)  # Brief pause before restarting
-                    continue  # Restart from join_game step
+                    self._sleep(0.2)
+
+                    # Click back button to return to the previous screen (prefer calibrated for speed)
+                    back_clicked = False
+                    if self._click_calibrated("back"):
+                        back_clicked = True
+                    else:
+                        # Fallback to template-based back if available
+                        try:
+                            if self.templates.exists("back_button"):
+                                back_clicked = self._click_tpl("back_button", self.cfg.min_conf_buttons, timeout_s=0.5)
+                        except Exception:
+                            back_clicked = False
+                        if not back_clicked:
+                            # As a last resort, another ESC
+                            self._press_esc()
+                            self._sleep(0.2)
+
+                    self._log_info("join_failure_recovery_steps", ok_dismissed=ok_dismissed, back_clicked=back_clicked)
+
+                    # Small settle before restart
+                    self._sleep(0.3)
+
+                    # Optionally try immediate re-open of Join Game to speed restart
+                    try:
+                        clicked = False
+                        if self._click_calibrated("join_game"):
+                            clicked = True
+                        elif self._click_tpl("join_game", self.cfg.min_conf_buttons, timeout_s=0.6):
+                            clicked = True
+                        if clicked:
+                            self._log_info("restart_immediate_join", message="Immediate join_game click after back button")
+                            self._sleep(0.25)
+                    except Exception:
+                        pass
+
+                    # Continue the main loop — will re-type code and attempt again
+                    continue
                 else:
                     # Timeout case: also use fast ESC + back instead of slow _dismiss_failure_and_back
                     self._status("Sim: join timeout — backing out and retrying…")
@@ -1255,7 +1329,10 @@ class AutoSimRunner:
             if len(parts) != 4:
                 return
             rx, ry, rw, rh = parts
-            L = int(win.get('left', 0)); T = int(win.get('top', 0)); W = int(win.get('width', 0)); H = int(win.get('height', 0))
+            L = int(win.get('left', 0))
+            T = int(win.get('top', 0))
+            W = int(win.get('width', 0))
+            H = int(win.get('height', 0))
             if W <= 0 or H <= 0:
                 return
             ax = int(L + rx * W)
@@ -1317,53 +1394,149 @@ class AutoSimRunner:
         """
         t0 = time.perf_counter()
         failure_templates = ["joining_failed", "connection_failed", "unknown_error", "join_failed"]
+        last_ocr_check = 0.0
 
-        while not self._stop.is_set():
-            # Check for successful_join first (highest priority)
-            if self.templates.exists("successful_join"):
-                path = self.templates.path("successful_join")
-                if path and self._find(path, 0.60, timeout_s=0.0):  # Higher confidence for success detection
-                    # Verify we're not still on server browser by checking for browser-specific elements
-                    browser_elements = ["search_box", "server_join", "join_game"]
-                    still_on_browser = False
-                    for browser_elem in browser_elements:
-                        if self.templates.exists(browser_elem):
-                            browser_path = self.templates.path(browser_elem)
-                            if browser_path and self._find(browser_path, 0.35, timeout_s=0.0):
-                                still_on_browser = True
-                                self._log_warn("false_positive_success", detected="successful_join", but_still_see=browser_elem)
-                                break
+        # Ensure we scan the whole Ark window (dialogs are center-screen); temporarily override any narrow ROI
+        prev_manual_roi = getattr(self.vision, 'search_roi', None)
+        roi_applied = False
+        try:
+            win = self._get_ark_window_region()
+            if isinstance(win, dict) and hasattr(self.vision, 'set_search_roi'):
+                self.vision.set_search_roi(win)
+                roi_applied = True
+                try:
+                    self._log_info("join_outcome_scan_roi_applied", roi=win)
+                except Exception:
+                    pass
 
-                    if not still_on_browser:
-                        self._log_info("join_success_detected", signal="successful_join")
-                        return "success"
+            while not self._stop.is_set():
+                # Check for successful_join first (highest priority)
+                if self.templates.exists("successful_join"):
+                    path = self.templates.path("successful_join")
+                    if path and self._find(path, 0.60, timeout_s=0.0):  # Higher confidence for success detection
+                        # Verify we're not still on server browser by checking for browser-specific elements
+                        browser_elements = ["search_box", "server_join", "join_game"]
+                        still_on_browser = False
+                        for browser_elem in browser_elements:
+                            if self.templates.exists(browser_elem):
+                                browser_path = self.templates.path(browser_elem)
+                                if browser_path and self._find(browser_path, 0.35, timeout_s=0.0):
+                                    still_on_browser = True
+                                    self._log_warn("false_positive_success", detected="successful_join", but_still_see=browser_elem)
+                                    break
 
-            # Check for specific failure signals with lower confidence for faster detection
-            for failure_name in failure_templates:
-                if self.templates.exists(failure_name):
-                    path = self.templates.path(failure_name)
-                    # Use lower confidence (0.30) for faster failure detection, especially for joining_failed
-                    confidence = 0.25 if failure_name == "joining_failed" else 0.30
-                    if path and self._find(path, confidence, timeout_s=0.0):
-                        self._log_warn("join_failure_signal_fast", signal=failure_name, confidence=confidence)
+                        if not still_on_browser:
+                            self._log_info("join_success_detected", signal="successful_join")
+                            return "success"
+
+                # Check for specific failure signals with lower confidence for faster detection
+                for failure_name in failure_templates:
+                    if self.templates.exists(failure_name):
+                        path = self.templates.path(failure_name)
+                        # Use very low confidence for fastest detection on the two most common failure banners
+                        confidence = 0.22 if failure_name in ("joining_failed", "connection_failed") else 0.30
+                        if path and self._find(path, confidence, timeout_s=0.0):
+                            self._log_warn("join_failure_signal_fast", signal=failure_name, confidence=confidence)
+                            return "failure"
+
+                # Heuristic modal detector: cyan frame + twin bottom buttons (center ROI, multiscale)
+                try:
+                    if self._detect_cf_modal_fast():
+                        self._log_warn("join_failure_modal_detected", method="cyan_frame_twin_buttons")
+                        # Press ESC to dismiss
+                        self._press_esc()
+                        self._sleep(0.08)
+                        # Confirm disappearance for ~1s before resuming
+                        confirmed = self._confirm_modal_dismissed(timeout_s=1.2)
+                        self._log_info("join_failure_modal_dismissed", confirmed=bool(confirmed))
                         return "failure"
+                except Exception:
+                    # Non-fatal; continue with other checks
+                    pass
 
-            # Also check for generic OK/error dialogs that might indicate failure
-            for dialog_name in ["ok_button", "error_dialog", "server_full"]:
-                if self.templates.exists(dialog_name):
-                    path = self.templates.path(dialog_name)
-                    if path and self._find(path, 0.30, timeout_s=0.0):
-                        self._log_warn("join_failure_dialog", signal=dialog_name)
-                        return "failure"
+                # Also check for generic OK/error dialogs that might indicate failure
+                for dialog_name in ["ok_button", "error_dialog", "server_full"]:
+                    if self.templates.exists(dialog_name):
+                        path = self.templates.path(dialog_name)
+                        if path and self._find(path, 0.30, timeout_s=0.0):
+                            self._log_warn("join_failure_dialog", signal=dialog_name)
+                            return "failure"
 
-            # Check if we've been waiting too long
-            elapsed = time.perf_counter() - t0
-            if elapsed >= 15.0:  # 15 second timeout
-                # Assume success if no failure signals detected
-                self._log_info("join_timeout_assume_success")
-                return "success"
+                # Check if we've been waiting too long
+                elapsed = time.perf_counter() - t0
+                if elapsed >= 15.0:  # 15 second timeout
+                    # Assume success if no failure signals detected
+                    self._log_info("join_timeout_assume_success")
+                    return "success"
 
-            self._sleep(0.15)  # Check every 150ms for faster response
+                # OCR fallback: detect prominent CONNECTION FAILED text if templates miss
+                now = time.perf_counter()
+                if pytesseract is not None and (now - last_ocr_check) >= 0.30:
+                    last_ocr_check = now
+                    try:
+                        win = self._get_ark_window_region()
+                        if isinstance(win, dict):
+                            L, T, W, H = int(win.get('left', 0)), int(win.get('top', 0)), int(win.get('width', 0)), int(win.get('height', 0))
+                            if W > 0 and H > 0:
+                                # Tight ROI centered near the observed failure text location
+                                ex = self.cfg.failure_text_expected_x_norm
+                                ey = self.cfg.failure_text_expected_y_norm
+                                rw = max(20, int(W * self.cfg.failure_text_roi_w_norm))
+                                rh = max(16, int(H * self.cfg.failure_text_roi_h_norm))
+                                cx = L + int(W * ex)
+                                cy = T + int(H * ey)
+                                cx0 = max(L, cx - rw // 2)
+                                cy0 = max(T, cy - rh // 2)
+                                # Clamp within window
+                                if cx0 + rw > L + W:
+                                    cx0 = L + W - rw
+                                if cy0 + rh > T + H:
+                                    cy0 = T + H - rh
+                                cw, ch = rw, rh
+                                frame = self.vision.capture_region_bgr({"left": cx0, "top": cy0, "width": cw, "height": ch})
+                                if isinstance(frame, (list, tuple)):
+                                    frame = None
+                                if frame is not None:
+                                    # Pre-filter: emphasize light glyphs on bluish background
+                                    b, g, r = cv2.split(frame)
+                                    # Light text mask: high intensity and relatively neutral
+                                    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                                    # Local contrast boost
+                                    gray = cv2.equalizeHist(gray)
+                                    # Upscale for better OCR
+                                    scale = 1.8
+                                    gray_up = cv2.resize(gray, (int(gray.shape[1] * scale), int(gray.shape[0] * scale)), interpolation=cv2.INTER_CUBIC)
+                                    # Binarize with Otsu
+                                    _, th = cv2.threshold(gray_up, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+                                    # Light morphological open to clean noise
+                                    th = cv2.morphologyEx(th, cv2.MORPH_OPEN, np.ones((3,3), np.uint8))
+                                    # Run OCR
+                                    text = pytesseract.image_to_string(
+                                        th,
+                                        config='--psm 6 -c tessedit_char_whitelist= CONECTIONFAILD'
+                                    ) or ""
+                                    up = text.upper()
+                                    if ("CONNECTION" in up and "FAILED" in up) or ("CONNECTION FAILED" in up):
+                                        self._log_warn("join_failure_ocr", snippet=up.strip()[:80])
+                                        return "failure"
+                    except Exception:
+                        # Silent fail; OCR is best-effort only
+                        pass
+
+                self._sleep(0.08)  # Faster polling for outcome (~12.5 Hz)
+        finally:
+            try:
+                if roi_applied and hasattr(self.vision, 'set_search_roi'):
+                    if prev_manual_roi is not None:
+                        self.vision.set_search_roi(prev_manual_roi)
+                    elif hasattr(self.vision, 'clear_search_roi'):
+                        self.vision.clear_search_roi()
+                    try:
+                        self._log_info("join_outcome_scan_roi_restored")
+                    except Exception:
+                        pass
+            except Exception:
+                pass
 
         return "timeout"
 
@@ -1397,6 +1570,94 @@ class AutoSimRunner:
                 self._log_warn("join_timeout")
                 return False
             self._sleep(0.15)
+        return False
+
+    def _detect_cf_modal_fast(self) -> bool:
+        """Heuristic detector for the cyan-framed Connection Failed modal with twin bottom buttons.
+        - Center ROI of the window
+        - Look for cyan-ish frame corners via hue/sat threshold + edge density
+        - Look for two nearly horizontal-aligned bright buttons near bottom of ROI
+        Returns True on strong evidence.
+        """
+        win = self._get_ark_window_region()
+        if not isinstance(win, dict):
+            return False
+        L, T, W, H = int(win.get('left', 0)), int(win.get('top', 0)), int(win.get('width', 0)), int(win.get('height', 0))
+        if W <= 0 or H <= 0:
+            return False
+        # Center ROI (modal area)
+        rx = L + int(W * 0.18)
+        ry = T + int(H * 0.18)
+        rw = int(W * 0.64)
+        rh = int(H * 0.62)
+        frame = self.vision.capture_region_bgr({"left": rx, "top": ry, "width": rw, "height": rh})
+        if frame is None or isinstance(frame, (list, tuple)):
+            return False
+        # Convert to HSV for cyan hues detection (approx 80-110 deg -> 40-55 in OpenCV hue [0..179])
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        # Cyan-ish band with decent saturation and brightness
+        lower = np.array([40, 40, 70], dtype=np.uint8)
+        upper = np.array([95, 255, 255], dtype=np.uint8)
+        mask = cv2.inRange(hsv, lower, upper)
+        # Edge emphasis to locate frame lines
+        edges = cv2.Canny(mask, 60, 160)
+        # Check four corner patches for strong edge presence
+        h, w = edges.shape[:2]
+        cw = max(12, w // 12)
+        ch = max(12, h // 12)
+        corners = [
+            edges[0:ch, 0:cw],
+            edges[0:ch, w - cw:w],
+            edges[h - ch:h, 0:cw],
+            edges[h - ch:h, w - cw:w],
+        ]
+        corner_scores = [float(np.count_nonzero(c)) / (c.size + 1e-6) for c in corners]
+        frame_present = sum(sc > 0.08 for sc in corner_scores) >= 3  # at least 3 corners edged
+        if not frame_present:
+            return False
+        # Twin bottom-buttons: look at bottom 30% area for two bright rectangular blobs aligned horizontally
+        bottom = frame[int(h * 0.70):, :]
+        gray = cv2.cvtColor(bottom, cv2.COLOR_BGR2GRAY)
+        gray = cv2.GaussianBlur(gray, (5, 5), 0)
+        _, thr = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        cnts, _ = cv2.findContours(thr, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        rects = []
+        for c in cnts:
+            x, y, ww, hh = cv2.boundingRect(c)
+            area = ww * hh
+            if area < (w * h) * 0.001:
+                continue
+            ar = ww / max(1, hh)
+            if 1.8 <= ar <= 6.5 and hh >= h * 0.03:
+                rects.append((x, y, ww, hh))
+        if len(rects) < 2:
+            return False
+        # Check for two with similar y (aligned) and reasonable gap
+        rects.sort(key=lambda r: r[0])
+        # take top 3 biggest
+        rects = sorted(rects, key=lambda r: r[2]*r[3], reverse=True)[:3]
+        for i in range(len(rects)):
+            for j in range(i + 1, len(rects)):
+                x1, y1, w1, h1 = rects[i]
+                x2, y2, w2, h2 = rects[j]
+                if abs((y1 + h1//2) - (y2 + h2//2)) <= max(6, int(h * 0.025)):
+                    gap = abs((x2 + w2//2) - (x1 + w1//2))
+                    if gap >= w * 0.12:
+                        return True
+        return False
+
+    def _confirm_modal_dismissed(self, timeout_s: float = 1.2) -> bool:
+        """Poll quickly to ensure the modal is gone for the given time window."""
+        t0 = time.perf_counter()
+        absence_since = None
+        while (time.perf_counter() - t0) < timeout_s:
+            if not self._detect_cf_modal_fast():
+                absence_since = absence_since or time.perf_counter()
+                if (time.perf_counter() - absence_since) >= 0.5:
+                    return True
+            else:
+                absence_since = None
+            self._sleep(0.06)
         return False
 
     def _dismiss_failure_and_back(self):

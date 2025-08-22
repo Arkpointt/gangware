@@ -118,6 +118,8 @@ class SimConfig:
     star_only_mode: bool = True
     # Normalized offset from row icon center to the desired click point on the row (relative to Ark window width/height)
     # Derived from calibrated norms: click_server.x (0.531510) - icon.x (0.056250) = 0.475260
+    # OCR fallback (disabled by default, enable via env GW_ENABLE_OCR_JOIN=1)
+    enable_ocr_fallback: bool = False
     star_to_click_dx_norm: float = 0.475260
     # Vertical offset from star to row click; typically near zero. Downward bias is applied later in click stage.
     star_to_click_dy_norm: float = 0.000000
@@ -173,6 +175,11 @@ class TemplateLibrary:
             # Outcomes / dialogs
             "server_full": ("server_full",),
             "join_failed": ("join_failed", "connection_failed", "joining_failed"),
+            # Accommodate common asset misspelling "uknown_error.png"
+            "unknown_error": ("unknown_error", "uknown_error"),
+            # Broaden connection failure variants (user assets may be named differently)
+            "connection_failed": ("connection_failed", "connection_fail", "fail_connection", "connectionfailure", "connection_failure"),
+            "joining_failed": ("joining_failed", "join_failed", "joiningfailure", "joinfailure"),
             "no_session": ("no_session",),
             "ok_button": ("ok_button",),
             "back_button": ("back_button", "back"),
@@ -288,6 +295,13 @@ class AutoSimRunner:
         base_dir = self.config_manager.config_path.parent
         self.templates = TemplateLibrary(base_dir / "templates" / "auto_sim")
         self._running = threading.Event()
+        # Tracks if ESC was already pressed inline during failure detection to avoid double-ESC
+        self._esc_pressed_inline = False
+        # Initialize toggles from environment
+        try:
+            self.cfg.enable_ocr_fallback = os.environ.get("GW_ENABLE_OCR_JOIN", "0").strip() in ("1", "true", "True")
+        except Exception:
+            pass
 
     # --------------- Public API ---------------
     def start(self, server_code: str) -> None:
@@ -320,7 +334,7 @@ class AutoSimRunner:
             self._log_info("restart_running", code=code)
             self.stop(join=True)
         self._stop.clear()
-        t = threading.Thread(target=self._run, args=(code,), daemon=True)
+        t = threading.Thread(target=self._run, args=(code,), daemon=False)
         self._thread = t
         self._running.set()
         t.start()
@@ -337,20 +351,26 @@ class AutoSimRunner:
         self._status("Sim: stopped.")
 
     def _detect_current_state(self) -> str:
-        """Detect current UI state to allow resuming from any point"""
+        """Detect current UI state to allow resuming from any point.
+        Returns one of: 'main_menu', 'join_screen', 'server_browser', 'unknown'.
+        """
         try:
             self._log_info("state_detection_step", step="checking_templates")
 
-            # Check in order of specificity - most unique templates first
+            # Check for explicit main menu anchor if provided
+            if self.templates.exists("main_menu"):
+                path = self.templates.path("main_menu")
+                if path and self._find(path, conf=0.35, timeout_s=0.0):
+                    self._log_info("state_detected", state="main_menu", via="main_menu")
+                    return "main_menu"
 
-            # Check for main menu (press_start visible) - FIRST priority
+            # Check for main menu by presence of press_start
             if self.templates.exists("press_start"):
                 path = self.templates.path("press_start")
                 if path:
                     self._log_info("state_detection_step", step="checking_press_start")
-                    coords = self.vision.find_template(path, confidence=0.30)  # Even lower confidence to catch main menu reliably
-                    if coords:
-                        self._log_info("state_detected", state="main_menu")
+                    if self._find(path, conf=0.30, timeout_s=0.0):
+                        self._log_info("state_detected", state="main_menu", via="press_start")
                         return "main_menu"
 
             # Check for join game screen (join_game button visible)
@@ -358,18 +378,16 @@ class AutoSimRunner:
                 path = self.templates.path("join_game")
                 if path:
                     self._log_info("state_detection_step", step="checking_join_game")
-                    coords = self.vision.find_template(path, confidence=0.40)  # Lower confidence
-                    if coords:
+                    if self._find(path, conf=0.40, timeout_s=0.0):
                         self._log_info("state_detected", state="join_screen")
                         return "join_screen"
 
-            # Check for server browser (search box visible) - LAST priority with very high confidence
+            # Check for server browser (search box visible)
             if self.templates.exists("search_box"):
                 path = self.templates.path("search_box")
                 if path:
                     self._log_info("state_detection_step", step="checking_search_box")
-                    coords = self.vision.find_template(path, confidence=0.40)  # Lower confidence
-                    if coords:
+                    if self._find(path, conf=0.40, timeout_s=0.0):
                         self._log_info("state_detected", state="server_browser")
                         return "server_browser"
 
@@ -379,7 +397,8 @@ class AutoSimRunner:
 
         except Exception as e:
             self._log_warn("state_detection_failed", error=str(e))
-            return "unknown"    # --------------- Core loop ---------------
+            return "unknown"
+    # --------------- Core loop ---------------
     def _run(self, server_code: str):
         self._log_info("_run_started", server_code=server_code)
         req_ok, msg = self.templates.ensure_required((
@@ -413,7 +432,7 @@ class AutoSimRunner:
             pass
         try:
             if hasattr(self, '_ensure_ark_foreground'):
-                self._ensure_ark_foreground(timeout=3.0)
+                self._ensure_ark_foreground(timeout=1.0)
         except Exception:
             pass
         try:
@@ -450,6 +469,11 @@ class AutoSimRunner:
         try:
             self._log_info("entering_main_loop")
             while not self._stop.is_set():
+                # Re-detect state each iteration to resume smartly from whatever screen is visible
+                try:
+                    current_state = self._detect_current_state()
+                except Exception:
+                    current_state = "unknown"
                 self._log_info("main_loop_iteration", current_state=current_state)
 
                 # Initialize server detection variables for each loop iteration
@@ -466,11 +490,6 @@ class AutoSimRunner:
                     self._log_info("already_in_game")
                     self._status("Sim: already in game - stopping")
                     break
-
-                # Clear state after first iteration
-                if current_state:
-                    self._log_info("clearing_initial_state", was=current_state)
-                    current_state = None
 
                 # step 1: press start (skip if we're already past this)
                 if not skip_to_server_browser and not skip_to_join_game:
@@ -1138,14 +1157,16 @@ class AutoSimRunner:
                         continue
 
                 # step 6: wait for join outcome - check for failure signals
+                # Reset inline ESC flag before waiting for outcome
+                self._esc_pressed_inline = False
                 join_result = self._wait_for_join_failure_signals()
                 if join_result == "success":
                     self._status("Sim: join appears successful — stopping loop.")
                     self._log_info("join_success")
                     break
-                elif join_result == "failure":
-                    # Handle failure quickly: dismiss dialog, go back, and restart join loop
-                    self._log_info("handling_join_failure_fast", message="Failure detected — ESC, dismiss, back, restart")
+                elif join_result in ("failure", "server_full"):
+                    # Handle failure quickly: ESC, dismiss dialog, go back, and restart join loop
+                    self._log_info("handling_join_failure_fast", message="Failure detected — ESC once, optional OK dismiss, smart resume next iteration", reason=join_result)
                     # Ensure Ark is foreground to receive inputs
                     try:
                         if hasattr(self, '_ensure_ark_foreground'):
@@ -1153,7 +1174,17 @@ class AutoSimRunner:
                     except Exception:
                         pass
 
-                    # Try to dismiss any visible OK/error dialog first
+                    # Send a quick ESC only if not already done inline
+                    esc_sent = False
+                    if not getattr(self, "_esc_pressed_inline", False):
+                        try:
+                            self._press_esc(times=1)
+                            esc_sent = True
+                        except Exception:
+                            esc_sent = False
+                        self._sleep(0.2)
+
+                    # Then try to dismiss any visible OK/error dialog
                     ok_dismissed = False
                     try:
                         if self.templates.exists("ok_button"):
@@ -1164,57 +1195,34 @@ class AutoSimRunner:
                     except Exception:
                         pass
 
-                    # Send a quick ESC to back out if needed
-                    self._press_esc()
-                    self._sleep(0.2)
-
-                    # Click back button to return to the previous screen (prefer calibrated for speed)
-                    back_clicked = False
-                    if self._click_calibrated("back"):
-                        back_clicked = True
-                    else:
-                        # Fallback to template-based back if available
-                        try:
-                            if self.templates.exists("back_button"):
-                                back_clicked = self._click_tpl("back_button", self.cfg.min_conf_buttons, timeout_s=0.5)
-                        except Exception:
-                            back_clicked = False
-                        if not back_clicked:
-                            # As a last resort, another ESC
-                            self._press_esc()
-                            self._sleep(0.2)
-
-                    self._log_info("join_failure_recovery_steps", ok_dismissed=ok_dismissed, back_clicked=back_clicked)
+                    # Do not send additional ESC or force back; rely on smart state detection next loop
+                    self._log_info("join_failure_recovery_steps", esc_sent=esc_sent, esc_inline=bool(getattr(self, "_esc_pressed_inline", False)), ok_dismissed=ok_dismissed, back_clicked=False, strategy="smart_resume")
 
                     # Small settle before restart
                     self._sleep(0.3)
 
-                    # Optionally try immediate re-open of Join Game to speed restart
-                    try:
-                        clicked = False
-                        if self._click_calibrated("join_game"):
-                            clicked = True
-                        elif self._click_tpl("join_game", self.cfg.min_conf_buttons, timeout_s=0.6):
-                            clicked = True
-                        if clicked:
-                            self._log_info("restart_immediate_join", message="Immediate join_game click after back button")
-                            self._sleep(0.25)
-                    except Exception:
-                        pass
-
                     # Continue the main loop — will re-type code and attempt again
+                    # Reset inline flag for next iteration
+                    self._esc_pressed_inline = False
                     continue
                 else:
                     # Timeout case: also use fast ESC + back instead of slow _dismiss_failure_and_back
-                    self._status("Sim: join timeout — backing out and retrying…")
-                    self._log_warn("join_timeout_fast_recovery")
-                    self._press_esc()
-                    self._sleep(0.5)
-                    if not self._click_calibrated("back"):
-                        self._press_esc()  # Fallback if back button fails
-                        self._sleep(0.2)
+                    self._status("Sim: join timeout — sending ESC and resyncing…")
+                    self._log_warn("join_timeout_fast_recovery", strategy="esc_only_then_smart_resume")
+                    try:
+                        if hasattr(self, '_ensure_ark_foreground'):
+                            self._ensure_ark_foreground(timeout=1.0)
+                    except Exception:
+                        pass
+                    try:
+                        if not getattr(self, "_esc_pressed_inline", False):
+                            self._press_esc(times=1)
+                        # Reset inline flag regardless for next iteration
+                        self._esc_pressed_inline = False
+                    except Exception:
+                        self._esc_pressed_inline = False
                     self._sleep(0.5)  # Brief pause before restarting
-                    continue  # Restart from join_game step
+                    continue  # Next iteration will re-detect state and resume
         finally:
             self._running.clear()
 
@@ -1390,11 +1398,13 @@ class AutoSimRunner:
 
     def _wait_for_join_failure_signals(self) -> str:
         """Wait for join outcome - specifically looking for failure signals.
-        Returns: 'success', 'failure', or 'timeout'
+        Returns: 'success', 'failure', 'server_full', or 'timeout'
         """
         t0 = time.perf_counter()
-        failure_templates = ["joining_failed", "connection_failed", "unknown_error", "join_failed"]
+        # Prioritize connection_failed as the most frequent failure
+        failure_templates = ["connection_failed", "server_full", "joining_failed", "unknown_error", "join_failed", "no_session"]
         last_ocr_check = 0.0
+        last_info_tick = 0.0
 
         # Ensure we scan the whole Ark window (dialogs are center-screen); temporarily override any narrow ROI
         prev_manual_roi = getattr(self.vision, 'search_roi', None)
@@ -1409,7 +1419,42 @@ class AutoSimRunner:
                 except Exception:
                     pass
 
+            # Announce the start of the outcome wait with the concrete triggers and timeout
+            try:
+                active_triggers = [n for n in failure_templates if self.templates.exists(n)]
+                self._log_info("join_outcome_wait_start", triggers=active_triggers, timeout_s=20.0)
+            except Exception:
+                pass
+
             while not self._stop.is_set():
+                # heartbeat you can see at INFO level
+                try:
+                    now_t = time.perf_counter()
+                    if (now_t - last_info_tick) >= 1.0:
+                        last_info_tick = now_t
+                        self._log_info("join_outcome_wait_tick", elapsed_s=round(now_t - t0, 1))
+                except Exception:
+                    pass
+
+                # 1) Heuristic first (cyan frame + twin buttons) → Esc immediately
+                try:
+                    if self._detect_cf_modal_fast():
+                        self._log_warn("join_failure_modal_detected", method="cyan_frame_twin_buttons")
+                        try:
+                            if hasattr(self, '_ensure_ark_foreground'):
+                                self._ensure_ark_foreground(timeout=1.0)
+                        except Exception:
+                            pass
+                        self._press_esc()
+                        self._esc_pressed_inline = True
+                        self._sleep(0.08)
+                        confirmed = self._confirm_modal_dismissed(timeout_s=1.2)
+                        self._log_info("join_failure_modal_dismissed", confirmed=bool(confirmed))
+                        return "failure"
+                except Exception:
+                    # Non-fatal; continue with other checks
+                    pass
+
                 # Check for successful_join first (highest priority)
                 if self.templates.exists("successful_join"):
                     path = self.templates.path("successful_join")
@@ -1429,33 +1474,32 @@ class AutoSimRunner:
                             self._log_info("join_success_detected", signal="successful_join")
                             return "success"
 
-                # Check for specific failure signals with lower confidence for faster detection
+                # 2) Templates (prioritize connection_failed)
                 for failure_name in failure_templates:
                     if self.templates.exists(failure_name):
                         path = self.templates.path(failure_name)
-                        # Use very low confidence for fastest detection on the two most common failure banners
-                        confidence = 0.22 if failure_name in ("joining_failed", "connection_failed") else 0.30
+                        # Use lower confidence for connection_failed as it's most frequent
+                        confidence = 0.15 if failure_name == "connection_failed" else 0.22
                         if path and self._find(path, confidence, timeout_s=0.0):
-                            self._log_warn("join_failure_signal_fast", signal=failure_name, confidence=confidence)
+                            if failure_name == "server_full":
+                                self._log_warn("server_full_detected", confidence=confidence)
+                                return "server_full"
+                            # Inline dismissal: bring Ark to foreground and press ESC immediately
+                            try:
+                                if hasattr(self, '_ensure_ark_foreground'):
+                                    self._ensure_ark_foreground(timeout=1.0)
+                            except Exception:
+                                pass
+                            try:
+                                self._press_esc()
+                                self._esc_pressed_inline = True
+                                self._log_warn("join_failure_signal_fast", signal=failure_name, confidence=confidence)
+                            except Exception:
+                                self._esc_pressed_inline = False
                             return "failure"
 
-                # Heuristic modal detector: cyan frame + twin bottom buttons (center ROI, multiscale)
-                try:
-                    if self._detect_cf_modal_fast():
-                        self._log_warn("join_failure_modal_detected", method="cyan_frame_twin_buttons")
-                        # Press ESC to dismiss
-                        self._press_esc()
-                        self._sleep(0.08)
-                        # Confirm disappearance for ~1s before resuming
-                        confirmed = self._confirm_modal_dismissed(timeout_s=1.2)
-                        self._log_info("join_failure_modal_dismissed", confirmed=bool(confirmed))
-                        return "failure"
-                except Exception:
-                    # Non-fatal; continue with other checks
-                    pass
-
                 # Also check for generic OK/error dialogs that might indicate failure
-                for dialog_name in ["ok_button", "error_dialog", "server_full"]:
+                for dialog_name in ["ok_button", "error_dialog"]:
                     if self.templates.exists(dialog_name):
                         path = self.templates.path(dialog_name)
                         if path and self._find(path, 0.30, timeout_s=0.0):
@@ -1464,14 +1508,57 @@ class AutoSimRunner:
 
                 # Check if we've been waiting too long
                 elapsed = time.perf_counter() - t0
-                if elapsed >= 15.0:  # 15 second timeout
-                    # Assume success if no failure signals detected
-                    self._log_info("join_timeout_assume_success")
-                    return "success"
+                if elapsed >= 20.0:  # 20 second timeout per spec
+                    # Treat as failure to avoid stalling; try to dismiss modal or OK if present
+                    # If we still see browser UI elements, it's clearly a failure
+                    try:
+                        browser_elements = [n for n in ("search_box", "server_join", "join_game") if self.templates.exists(n)]
+                    except Exception:
+                        browser_elements = []
+                    browser_visible = False
+                    for browser_elem in browser_elements:
+                        try:
+                            bp = self.templates.path(browser_elem)
+                            if bp and self._find(bp, 0.35, timeout_s=0.0):
+                                browser_visible = True
+                                break
+                        except Exception:
+                            pass
+                    if browser_visible:
+                        self._log_warn("join_timeout_assume_failure", reason="browser_ui_present")
+                        return "failure"
 
-                # OCR fallback: detect prominent CONNECTION FAILED text if templates miss
+                    # Try to dismiss via ESC then OK
+                    try:
+                        self._press_esc()
+                        self._esc_pressed_inline = True
+                        self._sleep(0.12)
+                        dismissed = False
+                        try:
+                            dismissed = bool(self._confirm_modal_dismissed(timeout_s=0.8))
+                        except Exception:
+                            dismissed = False
+                        if dismissed:
+                            self._log_warn("join_timeout_dismissed_modal")
+                            return "failure"
+                    except Exception:
+                        pass
+
+                    try:
+                        if self.templates.exists("ok_button"):
+                            if self._click_tpl("ok_button", self.cfg.min_conf_buttons, timeout_s=0.3):
+                                self._sleep(0.2)
+                                self._log_warn("join_timeout_clicked_ok")
+                                return "failure"
+                    except Exception:
+                        pass
+
+                    self._log_warn("join_timeout_assume_failure", reason="no_signals")
+                    return "failure"
+
+                # OCR fallback: detect prominent CONNECTION FAILED text if templates miss (opt-in)
                 now = time.perf_counter()
-                if pytesseract is not None and (now - last_ocr_check) >= 0.30:
+                if self.cfg.enable_ocr_fallback and pytesseract is not None and (now - last_ocr_check) >= 0.30:
                     last_ocr_check = now
                     try:
                         win = self._get_ark_window_region()
@@ -1714,6 +1801,19 @@ class AutoSimRunner:
                 except Exception:
                     pass
 
+            # Single-shot fast path: when timeout_s <= 0, do a non-blocking check once.
+            if timeout_s is None or timeout_s <= 0.0:
+                try:
+                    coords = self.vision.find_template(path, confidence=conf)
+                except Exception:
+                    coords = None
+                if coords:
+                    if ark_region and coords:
+                        coords = self._clamp_to_ark_window(coords, ark_region)
+                    return coords
+                return None
+
+            # Timed polling path: loop until found or timeout
             while not self._stop.is_set():
                 try:
                     coords = self.vision.find_template(path, confidence=conf)
@@ -2101,10 +2201,50 @@ class AutoSimRunner:
 
     # --------------- Utilities ---------------
     def _press_esc(self, times: int = 1):
+        count = max(1, int(times))
+        # Announce intent
         try:
-            self.input.press_key('esc', presses=max(1, int(times)), interval=0.10)
+            self._log_info("esc_press", times=count)
         except Exception:
             pass
+        # Primary attempt via input controller (pydirectinput.press)
+        try:
+            self.input.press_key('esc', presses=count, interval=0.10)
+            return
+        except Exception as e1:
+            # Secondary attempt using 'escape'
+            try:
+                self.input.press_key('escape', presses=count, interval=0.10)
+                return
+            except Exception as e2:
+                # Last-resort: Win32 keybd_event (ESC down/up)
+                try:
+                    import sys as _sys
+                    if _sys.platform == 'win32':
+                        import ctypes as _ct
+                        user32 = _ct.windll.user32
+                        VK_ESCAPE = 0x1B
+                        KEYEVENTF_KEYUP = 0x0002
+                        for _ in range(count):
+                            try:
+                                user32.keybd_event(VK_ESCAPE, 0, 0, 0)
+                                self._sleep(0.01)
+                                user32.keybd_event(VK_ESCAPE, 0, KEYEVENTF_KEYUP, 0)
+                                self._sleep(0.03)
+                            except Exception:
+                                pass
+                        try:
+                            self._log_info("esc_press_sendinput", times=count)
+                        except Exception:
+                            pass
+                        return
+                except Exception:
+                    pass
+                # If all methods failed, log once
+                try:
+                    self._log_warn("esc_press_failed", error=f"primary={str(e1)} secondary={str(e2)}")
+                except Exception:
+                    pass
 
     def _virtual_bounds(self) -> Optional[Tuple[int, int, int, int]]:
         try:

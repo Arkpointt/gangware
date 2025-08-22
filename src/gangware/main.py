@@ -104,7 +104,7 @@ def main() -> None:
     # Auto Sim runner
     auto_sim = AutoSimRunner(config_manager, vision_controller, input_controller, overlay=overlay)
     overlay.on_sim_start(lambda code: auto_sim.start(code))
-    overlay.on_sim_stop(lambda: auto_sim.stop())
+    overlay.on_sim_stop(lambda: auto_sim.stop(join=True))
     # SIM calibration controls routed to hotkey manager (F7-driven)
     overlay.on_sim_cal_start(lambda: hotkey_manager.start_sim_calibration())
     overlay.on_sim_cal_cancel(lambda: hotkey_manager.cancel_sim_calibration())

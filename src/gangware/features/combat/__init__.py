@@ -24,8 +24,8 @@ from __future__ import annotations
 from typing import Callable
 
 # Reuse existing macro implementations; this file only wires feature boundaries.
-from ...macros import armor_swapper as _armor
-from ...macros import combat as _combat
+from .macros import armor_swapper as _armor
+from .macros import combat as _combat
 
 
 # ----------------------- Armor equip tasks (F2/F3/F4) -----------------------

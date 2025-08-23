@@ -130,7 +130,7 @@ class Worker(threading.Thread):
         # Helper to produce a tagged Tek Punch callable similar to HotkeyManager
         def _job(vc, ic):
             try:
-                from ..macros import combat as _combat
+                from ..features.combat.macros import combat as _combat
                 _combat.execute_tek_punch(ic, self.config_manager)
             except Exception:
                 pass

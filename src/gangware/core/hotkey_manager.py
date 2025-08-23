@@ -35,7 +35,7 @@ import ctypes
 import logging
 
 # Macro libraries
-from ..macros import armor_swapper, combat
+from ..features.combat.macros import armor_swapper, combat
 
 if sys.platform == "win32":
     from ctypes import wintypes

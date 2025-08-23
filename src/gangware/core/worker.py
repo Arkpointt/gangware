@@ -3,10 +3,18 @@ Worker Thread Module
 Processes tasks from the queue.
 """
 
-
 import threading
 import logging
 import time
+from typing import Optional, Protocol
+
+
+class StatusCallbackProtocol(Protocol):
+    """Protocol for status callback objects with UI feedback methods."""
+    def success_flash(self, message: str) -> None: ...
+    def flash_hotkey_line(self, hotkey: str) -> None: ...
+    def set_status(self, text: str) -> None: ...
+    def __call__(self, text: str) -> None: ...  # For callable fallback
 
 
 class Worker(threading.Thread):
@@ -19,7 +27,7 @@ class Worker(threading.Thread):
         vision_controller,
         input_controller,
         task_queue,
-        status_callback=None,
+        status_callback: Optional[StatusCallbackProtocol] = None,
     ):
         super().__init__(daemon=True)
         self.config_manager = config_manager
@@ -79,7 +87,9 @@ class Worker(threading.Thread):
 
     def _before_execute(self, task, is_tek_dash: bool) -> None:
         # For labeled tasks, trigger a subtle success flash in the UI at start
-        if isinstance(task, dict) and 'label' in task and hasattr(self.status_callback, 'success_flash'):
+        if (isinstance(task, dict) and 'label' in task and 
+            self.status_callback is not None and 
+            hasattr(self.status_callback, 'success_flash')):
             try:
                 self.status_callback.success_flash(task['label'])
             except Exception:
@@ -118,7 +128,8 @@ class Worker(threading.Thread):
             pass
         try:
             self.task_queue.put_nowait(self._make_tek_punch_task())
-            if hasattr(self.status_callback, 'flash_hotkey_line'):
+            if (self.status_callback is not None and 
+                hasattr(self.status_callback, 'flash_hotkey_line')):
                 try:
                     self.status_callback.flash_hotkey_line("Shift+R")
                 except Exception:

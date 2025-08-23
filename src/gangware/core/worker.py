@@ -87,8 +87,8 @@ class Worker(threading.Thread):
 
     def _before_execute(self, task, is_tek_dash: bool) -> None:
         # For labeled tasks, trigger a subtle success flash in the UI at start
-        if (isinstance(task, dict) and 'label' in task and 
-            self.status_callback is not None and 
+        if (isinstance(task, dict) and 'label' in task and
+            self.status_callback is not None and
             hasattr(self.status_callback, 'success_flash')):
             try:
                 self.status_callback.success_flash(task['label'])
@@ -128,7 +128,7 @@ class Worker(threading.Thread):
             pass
         try:
             self.task_queue.put_nowait(self._make_tek_punch_task())
-            if (self.status_callback is not None and 
+            if (self.status_callback is not None and
                 hasattr(self.status_callback, 'flash_hotkey_line')):
                 try:
                     self.status_callback.flash_hotkey_line("Shift+R")

@@ -37,30 +37,24 @@ import logging
 # Macro libraries
 from ..features.combat.macros import armor_swapper, combat
 
+# Windows utilities - use centralized module instead of duplicating
+from .win32 import utils as w32
+
 if sys.platform == "win32":
     from ctypes import wintypes
-
-    user32 = ctypes.windll.user32
-    kernel32 = ctypes.windll.kernel32
-
-    class POINT(ctypes.Structure):
-        _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
-
-    class RECT(ctypes.Structure):
-        _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long), ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
-
-    def _cursor_pos() -> Tuple[int, int]:
-        pt = POINT()
-        user32.GetCursorPos(ctypes.byref(pt))
-        return int(pt.x), int(pt.y)
+    user32 = w32.user32
+    kernel32 = w32.kernel32
+    POINT = w32.POINT
+    RECT = w32.RECT
+    _cursor_pos = w32.cursor_pos
 else:
+    from ctypes import wintypes
     user32 = None
     kernel32 = None
-    # Provide a minimal wintypes stub for non-Windows to satisfy linters/type-checkers.
-    class _WinTypesStub:
-        class MSG(ctypes.Structure):
-            _fields_ = []
-    wintypes = _WinTypesStub()
+    POINT = object
+    RECT = object
+    def _cursor_pos() -> Tuple[int, int]:
+        return (0, 0)
 
 
 class HotkeyManager(threading.Thread):
@@ -113,7 +107,7 @@ class HotkeyManager(threading.Thread):
                 # If this is legacy absolute (no decimals), convert once to relative using current monitor
                 if ',' in _roi_str and not _roi_str.count('.') >= 3:
                     monitor_bounds = self._get_current_monitor_bounds()
-                    rel_roi = self._absolute_to_relative_roi(_roi_str, monitor_bounds)
+                    rel_roi = w32.absolute_to_relative_roi(_roi_str, monitor_bounds)
                     if rel_roi:
                         self.config_manager.config["DEFAULT"]["vision_roi"] = rel_roi
                         try:
@@ -791,7 +785,7 @@ class HotkeyManager(threading.Thread):
         os.environ["GW_VISION_ROI"] = abs_roi_str
 
         # Convert to relative coordinates for storage
-        rel_roi_str = self._absolute_to_relative_roi(abs_roi_str, monitor_bounds)
+        rel_roi_str = w32.absolute_to_relative_roi(abs_roi_str, monitor_bounds)
 
         # Persist relative coordinates in config
         try:

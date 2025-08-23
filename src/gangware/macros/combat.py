@@ -4,11 +4,15 @@ Executes combat-related macros (e.g., Tek Punch).
 """
 
 import time
+import logging
 from typing import Optional
 
 # The macro functions can optionally receive an overlay-like object that exposes
 # set_hotkey_line_active(hotkey: str) and clear_hotkey_line_active(hotkey: str, fade_duration_ms: int)
 # We pass overlay=None by default to avoid tight coupling.
+
+# Module logger
+logger = logging.getLogger(__name__)
 
 
 # Smart cooldown timestamp for Tek Punch (allow immediate retrigger once complete)
@@ -52,12 +56,12 @@ def execute_tek_punch(input_controller, config_manager=None):
     now = __import__('time').perf_counter()
     if now < _last_tek_punch_ready_at:
         # Still within the active window from a previous run; skip
-        print("Tek Punch skipped due to active cooldown window.")
+        logger.info("tek_punch: skipped due to active cooldown window")
         return
 
     cancel_key = _resolve_cancel_key(config_manager)
 
-    print("Executing Tek Punch macro...")
+    logger.info("tek_punch: start")
     try:
         import time
         # Hold right-click for 700 ms
@@ -69,11 +73,11 @@ def execute_tek_punch(input_controller, config_manager=None):
         # Double-tap cancel key quickly
         input_controller.press_key(cancel_key, presses=2, interval=0.06)
     except Exception as e:
-        print(f"Tek Punch error: {e}")
+        logger.exception("tek_punch: error")
     finally:
         # Mark ready timestamp at actual completion time
         _last_tek_punch_ready_at = __import__('time').perf_counter()
-        print("Tek Punch executed.")
+        logger.info("tek_punch: done")
 
 
 def execute_medbrew_burst(input_controller):
@@ -82,14 +86,14 @@ def execute_medbrew_burst(input_controller):
 
     Assumes Medbrews are bound to the '0' hotbar slot in-game.
     """
-    print("Executing Medbrew Burst macro (0 x5)...")
+    logger.info("medbrew_burst: start (0 x5)")
     try:
         # Press '0' five times with ~200ms between presses for reliability.
         input_controller.press_key('0', presses=5, interval=0.20)
     except Exception as e:
-        print(f"Medbrew Burst error: {e}")
+        logger.exception("medbrew_burst: error")
     finally:
-        print("Medbrew Burst executed.")
+        logger.info("medbrew_burst: done")
 
 
 def execute_medbrew_hot_toggle(input_controller, overlay: Optional[object] = None):
@@ -105,7 +109,7 @@ def execute_medbrew_hot_toggle(input_controller, overlay: Optional[object] = Non
     interval = 1.5
     presses = int(total_duration / interval) + 1  # include t=0 and t=22.5 -> 16
 
-    print(f"Executing Medbrew HOT over-time: 0 every {interval}s for {total_duration}s...")
+    logger.info("medbrew_hot: start interval=%.2fs total=%.2fs presses=%d", interval, total_duration, presses)
 
     # Mark line active in overlay
     try:
@@ -126,11 +130,11 @@ def execute_medbrew_hot_toggle(input_controller, overlay: Optional[object] = Non
             try:
                 input_controller.press_key('0', presses=1)
             except Exception as e:
-                print(f"Medbrew HOT press error at {i}: {e}")
+                logger.exception("medbrew_hot: press error at %d", i)
     except Exception as e:
-        print(f"Medbrew HOT error: {e}")
+        logger.exception("medbrew_hot: error")
     finally:
-        print("Medbrew HOT completed.")
+        logger.info("medbrew_hot: completed")
         try:
             if overlay and hasattr(overlay, "clear_hotkey_line_active"):
                 # Slow fade to match the requested behavior

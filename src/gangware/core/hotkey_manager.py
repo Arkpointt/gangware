@@ -25,10 +25,11 @@ import sys
 import os
 from pathlib import Path
 
-import cv2  # type: ignore
 import mss  # type: ignore
 import numpy as np  # type: ignore
 from ..controllers.armor_matcher import ArmorMatcher
+from ..features.debug.keys import capture_input_windows, wait_key_release
+from ..features.debug.template import wait_and_capture_template
 
 import ctypes
 import logging
@@ -122,7 +123,7 @@ class HotkeyManager(threading.Thread):
                         _roi_str = rel_roi
                         logging.getLogger(__name__).info("startup: converted absolute ROI to relative: %s", rel_roi)
 
-                # Defer absolute application to feature start (e.g., Auto Sim).
+                # Defer absolute application to feature start.
                 # Avoid mapping ROI at startup to prevent misalignment when Ark is not foreground.
                 if _roi_str and "GW_VISION_ROI" not in os.environ:
                     logging.getLogger(__name__).info("startup: deferred ROI application until feature start")
@@ -163,25 +164,10 @@ class HotkeyManager(threading.Thread):
                 # Overlay recalibration (F7 or button) should trigger the flow
                 if hasattr(self.overlay, "on_recalibrate"):
                     self.overlay.on_recalibrate(self.request_recalibration)
-                # SIM calibration wiring (F7-driven while active)
-                if hasattr(self.overlay, "on_sim_cal_start"):
-                    self.overlay.on_sim_cal_start(self.start_sim_calibration)
-                if hasattr(self.overlay, "on_sim_cal_cancel"):
-                    self.overlay.on_sim_cal_cancel(self.cancel_sim_calibration)
+
         except Exception:
             pass
-        # SIM calibration state
-        self._sim_cal_active = False
-        self._sim_cal_idx = 0
-        self._sim_cal_targets = [
-            ("press_start", "PRESS START"),
-            ("join_game", "JOIN GAME"),
-            ("search_box", "SEARCH field"),
-            ("server_join", "SERVER JOIN"),
-        ]
-        self._sim_cal_points = {}
-        self._sim_cal_pts_stream: list[tuple[float, float]] = []
-        self._sim_cal_last_f7_ts: float = 0.0
+        # End of init
         # Log system environment on startup for troubleshooting
         self._log_system_environment()
 
@@ -211,7 +197,7 @@ class HotkeyManager(threading.Thread):
                 # Ultimate fallback
                 return {'left': 0, 'top': 0, 'width': 1920, 'height': 1080}
 
-    def _relative_to_absolute_roi(self, rel_str: str, monitor_bounds: dict = None) -> str:
+    def _relative_to_absolute_roi(self, rel_str: str, monitor_bounds: Optional[dict] = None) -> str:
         """Convert relative ROI (percentages) to absolute pixels.
 
         Format: 'rel_x,rel_y,rel_w,rel_h' -> 'abs_x,abs_y,abs_w,abs_h'
@@ -239,7 +225,7 @@ class HotkeyManager(threading.Thread):
         except Exception:
             return ""
 
-    def _absolute_to_relative_roi(self, abs_str: str, monitor_bounds: dict = None) -> str:
+    def _absolute_to_relative_roi(self, abs_str: str, monitor_bounds: Optional[dict] = None) -> str:
         """Convert absolute ROI (pixels) to relative (percentages).
 
         Format: 'abs_x,abs_y,abs_w,abs_h' -> 'rel_x,rel_y,rel_w,rel_h'
@@ -297,113 +283,9 @@ class HotkeyManager(threading.Thread):
             if abs_roi:
                 logger.info("startup: absolute_roi=%s", abs_roi)
         except Exception:
-            pass    # --------------------------- Thread entry ----------------------------
-
-    # --------------------------- SIM calibration helpers ----------------------------
-    def start_sim_calibration(self) -> None:
-        self._sim_cal_active = True
-        self._sim_cal_idx = 0
-        self._sim_cal_points = {}
-        self._sim_cal_pts_stream = []
-        self._sim_cal_last_f7_ts = 0.0
-        # Hide overlay to allow Ark to be foreground while capturing
-        try:
-            if self.overlay:
-                # Use thread-safe signal to avoid cross-thread GUI access
-                if hasattr(self.overlay, 'set_visible_safe'):
-                    self.overlay.set_visible_safe(False)
-                elif hasattr(self.overlay, 'set_visible'):
-                    self.overlay.set_visible(False)
-        except Exception:
-            pass
-        try:
-            logging.getLogger(__name__).info("sim_cal: calibration mode started - press F7 to capture coordinates, F9 to stop")
-        except Exception:
             pass
 
-    def cancel_sim_calibration(self) -> None:
-        self._sim_cal_active = False
-        self._sim_cal_idx = 0
-        self._sim_cal_points = {}
-        self._sim_cal_pts_stream = []
-        self._sim_cal_last_f7_ts = 0.0
-        # Show overlay back
-        try:
-            if self.overlay:
-                if hasattr(self.overlay, 'set_visible_safe'):
-                    self.overlay.set_visible_safe(True)
-                elif hasattr(self.overlay, 'set_visible'):
-                    self.overlay.set_visible(True)
-                if hasattr(self.overlay, 'set_status_safe'):
-                    self.overlay.set_status_safe("SIM Calibration cancelled.")
-                elif hasattr(self.overlay, 'set_status'):
-                    self.overlay.set_status("SIM Calibration cancelled.")
-        except Exception:
-            pass
-
-    def _sim_cal_capture_step(self) -> None:
-        # Get cursor pos
-        try:
-            x, y = _cursor_pos()
-        except Exception:
-            return
-        # Prefer Ark window rect by title substring (case-insensitive)
-        rect = self._get_ark_window_rect_by_proc() or self._get_ark_window_rect_by_title() or self._get_virtual_screen_rect()
-        if not rect:
-            try:
-                logging.getLogger(__name__).warning("sim_cal: no window rect available; capture ignored")
-            except Exception:
-                pass
-            return
-        L, T, R, B = rect
-        W = max(1, R - L)
-        H = max(1, B - T)
-        nx = max(0.0, min(1.0, float(x - L) / float(W)))
-        ny = max(0.0, min(1.0, float(y - T) / float(H)))
-
-        # Log the coordinates and record them in the stream
-        try:
-            logging.getLogger(__name__).info("sim_cal: captured norm=(%.6f,%.6f) abs=(%d,%d) rect=(%d,%d,%d,%d)", nx, ny, x, y, L, T, R, B)
-        except Exception:
-            pass
-
-        # Do not store points on F7; logging only for debugging
-
-        # Update last press timestamp (for potential diagnostics only)
-        try:
-            import time as _t
-            self._sim_cal_last_f7_ts = _t.perf_counter()
-        except Exception:
-            pass
-
-    def _save_sim_calibration(self) -> None:
-        try:
-            # Map first four points to named targets for quick fallback use
-            for i, (key, _label) in enumerate(self._sim_cal_targets):
-                if i < len(self._sim_cal_pts_stream):
-                    nx, ny = self._sim_cal_pts_stream[i]
-                    self.config_manager.config["DEFAULT"][f"sim_{key}_norm"] = f"{nx:.6f},{ny:.6f}"
-                    # Also persist absolute form for diagnostics if needed later
-                    self.config_manager.config["DEFAULT"][f"sim_{key}_abs"] = f"{int(nx*1000000)},{int(ny*1000000)}"  # placeholder for diagn.
-            # Persist full stream as semicolon-separated list
-            pts_str = ";".join(f"{nx:.6f},{ny:.6f}" for nx, ny in self._sim_cal_pts_stream)
-            self.config_manager.config["DEFAULT"]["sim_points"] = pts_str
-            self.config_manager.config["DEFAULT"]["sim_points_count"] = str(len(self._sim_cal_pts_stream))
-            import time as _t
-            ts = int(_t.time())
-            self.config_manager.config["DEFAULT"]["sim_calibrated_at"] = str(ts)
-            self.config_manager.save()
-            try:
-                logging.getLogger(__name__).info(
-                    "sim_cal: saved timestamp=%d count=%d points=%s",
-                    ts,
-                    len(self._sim_cal_pts_stream),
-                    pts_str[:512]
-                )
-            except Exception:
-                pass
-        except Exception:
-            pass
+    # --------------------------- Thread entry ----------------------------
 
     def _get_foreground_rect(self) -> tuple[int, int, int, int] | None:
         try:
@@ -437,22 +319,22 @@ class HotkeyManager(threading.Thread):
         """
         try:
             target_exe = "arkascended.exe"
-            found_hwnd = ctypes.wintypes.HWND()
+            found_hwnd = wintypes.HWND()
 
-            @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.wintypes.HWND, ctypes.wintypes.LPARAM)
+            @ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
             def _enum_proc(hwnd, lparam):
                 try:
                     # Skip invisible/minimized windows
                     if not user32.IsWindowVisible(hwnd):
                         return True
-                    pid = ctypes.wintypes.DWORD()
+                    pid = wintypes.DWORD()
                     user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
                     PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
                     hproc = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid.value)
                     if not hproc:
                         return True
                     try:
-                        buf_len = ctypes.wintypes.DWORD(260)
+                        buf_len = wintypes.DWORD(260)
                         while True:
                             buf = ctypes.create_unicode_buffer(buf_len.value)
                             ok = kernel32.QueryFullProcessImageNameW(hproc, 0, buf, ctypes.byref(buf_len))
@@ -465,7 +347,7 @@ class HotkeyManager(threading.Thread):
                             needed = buf_len.value
                             if needed <= len(buf):
                                 break
-                            buf_len = ctypes.wintypes.DWORD(needed)
+                            buf_len = wintypes.DWORD(needed)
                     finally:
                         kernel32.CloseHandle(hproc)
                 except Exception:
@@ -486,9 +368,9 @@ class HotkeyManager(threading.Thread):
         """Find Ark window by title substring (case-insensitive) and return its rect."""
         try:
             target = "arkascended"
-            found_hwnd = ctypes.wintypes.HWND()
+            found_hwnd = wintypes.HWND()
 
-            @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.wintypes.HWND, ctypes.wintypes.LPARAM)
+            @ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
             def _enum_proc(hwnd, lparam):
                 # Skip invisible windows
                 try:
@@ -532,23 +414,23 @@ class HotkeyManager(threading.Thread):
         end = _t.time() + max(0.0, float(timeout))
         SW_RESTORE = 9
 
-        def _find_hwnd_by_proc() -> ctypes.wintypes.HWND | None:
+        def _find_hwnd_by_proc() -> wintypes.HWND | None:
             target_exe = "arkascended.exe"
-            found_hwnd = ctypes.wintypes.HWND()
+            found_hwnd = wintypes.HWND()
 
-            @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.wintypes.HWND, ctypes.wintypes.LPARAM)
+            @ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
             def _enum_proc(hwnd, lparam):
                 try:
                     if not user32.IsWindowVisible(hwnd):
                         return True
-                    pid = ctypes.wintypes.DWORD()
+                    pid = wintypes.DWORD()
                     user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
                     PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
                     hproc = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid.value)
                     if not hproc:
                         return True
                     try:
-                        buf_len = ctypes.wintypes.DWORD(260)
+                        buf_len = wintypes.DWORD(260)
                         while True:
                             buf = ctypes.create_unicode_buffer(buf_len.value)
                             ok = kernel32.QueryFullProcessImageNameW(hproc, 0, buf, ctypes.byref(buf_len))
@@ -561,7 +443,7 @@ class HotkeyManager(threading.Thread):
                             needed = buf_len.value
                             if needed <= len(buf):
                                 break
-                            buf_len = ctypes.wintypes.DWORD(needed)
+                            buf_len = wintypes.DWORD(needed)
                     finally:
                         kernel32.CloseHandle(hproc)
                 except Exception:
@@ -664,28 +546,12 @@ class HotkeyManager(threading.Thread):
             if user32 is None:
                 return
             is_down_f7 = bool(user32.GetAsyncKeyState(0x76) & 0x8000)
-            # When SIM calibration is active, use polling edge-detect to capture coords
-            if getattr(self, "_sim_cal_active", False):
-                # Rising edge: press -> capture
-                if is_down_f7 and not getattr(self, "_f7_down", False):
-                    self._f7_down = True
-                    try:
-                        self._sim_cal_capture_step()
-                    except Exception:
-                        pass
-                # Falling edge: release -> reset
-                elif not is_down_f7 and getattr(self, "_f7_down", False):
-                    self._f7_down = False
-                return
-            # Otherwise, normal recalibration UI flow
+            # Normal recalibration UI flow
             self._update_f7_state(is_down_f7, set_gate=False)
         except Exception:
             pass
 
     def _update_f7_state(self, is_down_f7: bool, set_gate: bool) -> None:
-        # When SIM calibration is active, F7 should not trigger overlay recalibration UI
-        if getattr(self, "_sim_cal_active", False):
-            return
         if is_down_f7 and not self._f7_down:
             self._f7_down = True
             if set_gate:
@@ -791,7 +657,7 @@ class HotkeyManager(threading.Thread):
         self._reg_hotkey(HK_F9, MOD_NONE, VK_F9, "F9")
         self._reg_hotkey(HK_F10, MOD_NONE, VK_F10, "F10")
         self._has_reg_f1 = self._reg_hotkey(HK_F1, MOD_NONE, VK_F1, "F1")
-        # Global Sim toggle
+        # F11 is available for future use
         self._reg_hotkey(HK_F11, MOD_NONE, VK_F11, "F11")
         # Manual ROI capture (global)
         self._reg_hotkey(HK_F6, MOD_NONE, VK_F6, "F6")
@@ -860,121 +726,19 @@ class HotkeyManager(threading.Thread):
         self._toggle_overlay_visibility()
 
     def _on_hotkey_f7(self) -> None:
-        # If SIM calibration is active, capture coordinates (just log, don't save)
-        if getattr(self, "_sim_cal_active", False):
-            try:
-                self._sim_cal_capture_step()
-            except Exception:
-                pass
-            return
-
-        # Start calibration mode with single F7 press
+        """Trigger recalibration when F7 is pressed."""
         try:
-            self._sim_cal_active = True
-            self._sim_cal_idx = 0
-            self._sim_cal_points = {}
-            self._sim_cal_pts_stream = []
-            self._sim_cal_last_f7_ts = 0.0
-            # Hide overlay during calibration
-            if self.overlay:
-                # Use thread-safe signal to avoid cross-thread GUI access from hotkey thread
-                if hasattr(self.overlay, 'set_visible_safe'):
-                    self.overlay.set_visible_safe(False)
-                elif hasattr(self.overlay, 'set_visible'):
-                    self.overlay.set_visible(False)
-            # Log start message
-            import logging
-            logging.getLogger(__name__).info("sim_cal: calibration mode started - press F7 to capture coordinates, F9 to stop")
+            self._recalibrate_event.set()
         except Exception:
             pass
 
     def _on_hotkey_f11(self) -> None:
-        """Global toggle: Start/Stop Sim and hide/show overlay accordingly."""
-        try:
-            ov = self.overlay
-            if not ov:
-                return
-            running = False
-            if hasattr(ov, 'is_sim_running'):
-                try:
-                    running = bool(ov.is_sim_running())
-                except Exception:
-                    running = False
-            if running:
-                # Stop and show overlay
-                if hasattr(ov, 'request_sim_stop_hotkey'):
-                    ov.request_sim_stop_hotkey()
-                else:
-                    try:
-                        ov.set_status("SIM: Stop (F11)")
-                    except Exception:
-                        pass
-                    if hasattr(ov, 'signals') and hasattr(ov.signals, 'sim_stop'):
-                        ov.signals.sim_stop.emit()
-                    if hasattr(ov, 'set_visible_safe'):
-                        ov.set_visible_safe(True)
-            else:
-                # Start with current code and hide overlay
-                if hasattr(ov, 'request_sim_start_hotkey'):
-                    ov.request_sim_start_hotkey()
-                else:
-                    code = ''
-                    try:
-                        code = ov.sim_input.text().strip()
-                    except Exception:
-                        pass
-                    if hasattr(ov, 'signals') and hasattr(ov.signals, 'sim_start'):
-                        ov.signals.sim_start.emit(code)
-                    if hasattr(ov, 'set_visible_safe'):
-                        ov.set_visible_safe(False)
-        except Exception:
-            pass
+        """F11 hotkey handler - currently disabled."""
+        pass
 
     def _on_hotkey_f9(self) -> None:
-        """Stop SIM calibration mode (F9).
-
-        Finishes calibration and saves captured coordinates.
-        Only works when SIM calibration is active.
-        """
-        # Only works during active SIM calibration
-        if not getattr(self, "_sim_cal_active", False):
-            return
-
-        try:
-            # End calibration session without saving
-            self._sim_cal_active = False
-            self._sim_cal_last_f7_ts = 0.0
-
-            # Show overlay back and notify (thread-safe)
-            if self.overlay:
-                if hasattr(self.overlay, 'set_visible_safe'):
-                    self.overlay.set_visible_safe(True)
-                elif hasattr(self.overlay, 'set_visible'):
-                    self.overlay.set_visible(True)
-                msg = "SIM Calibration mode stopped."
-                if hasattr(self.overlay, 'set_status_safe'):
-                    self.overlay.set_status_safe(msg)
-                elif hasattr(self.overlay, 'set_status'):
-                    self.overlay.set_status(msg)
-
-            # Log completion
-            import logging
-            logging.getLogger(__name__).info("sim_cal: calibration mode stopped via F9")
-        except Exception:
-            # Fallback: just end the calibration session
-            try:
-                self._sim_cal_active = False
-                if self.overlay:
-                    if hasattr(self.overlay, 'set_visible_safe'):
-                        self.overlay.set_visible_safe(True)
-                    elif hasattr(self.overlay, 'set_visible'):
-                        self.overlay.set_visible(True)
-                    if hasattr(self.overlay, 'set_status_safe'):
-                        self.overlay.set_status_safe("SIM Calibration mode stopped.")
-                    elif hasattr(self.overlay, 'set_status'):
-                        self.overlay.set_status("SIM Calibration mode stopped.")
-            except Exception:
-                pass
+        """F9 hotkey handler - currently disabled."""
+        pass
 
     def _on_hotkey_f6(self) -> None:
         """Two-press manual ROI capture (F6): first press stores top-left, second sets bottom-right.
@@ -1117,14 +881,14 @@ class HotkeyManager(threading.Thread):
         hwnd = user32.GetForegroundWindow()
         if not hwnd:
             return ""
-        pid = ctypes.wintypes.DWORD()
+        pid = wintypes.DWORD()
         user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
         PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
         hproc = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid.value)
         if not hproc:
             return ""
         try:
-            buf_len = ctypes.wintypes.DWORD(260)
+            buf_len = wintypes.DWORD(260)
             while True:
                 buf = ctypes.create_unicode_buffer(buf_len.value)
                 ok = kernel32.QueryFullProcessImageNameW(hproc, 0, buf, ctypes.byref(buf_len))
@@ -1133,7 +897,7 @@ class HotkeyManager(threading.Thread):
                 needed = buf_len.value
                 if needed <= len(buf):
                     break
-                buf_len = ctypes.wintypes.DWORD(needed)
+                buf_len = wintypes.DWORD(needed)
             return ""
         finally:
             kernel32.CloseHandle(hproc)
@@ -1203,7 +967,8 @@ class HotkeyManager(threading.Thread):
                 if self._hot_stop_event.is_set():
                     break
                 try:
-                    self.input_controller.press_key('0', presses=1)
+                    if self.input_controller:
+                        self.input_controller.press_key('0', presses=1)
                 except Exception:
                     pass
         finally:
@@ -1373,7 +1138,7 @@ class HotkeyManager(threading.Thread):
         try:
             # Debounce F7 release before starting capture to avoid capturing F7 itself
             try:
-                self._wait_key_release(0x76, 0.8)
+                wait_key_release(0x76, 0.8)
             except Exception:
                 pass
             # Ensure UI is in calibration state
@@ -1390,7 +1155,7 @@ class HotkeyManager(threading.Thread):
                 self.overlay.set_status(
                     "Open your inventory, hover the search bar, then press F8 to capture."
                 )
-            tmpl_path = self._wait_and_capture_template()
+            tmpl_path = wait_and_capture_template(self.config_manager, self.overlay)
             if not tmpl_path:
                 if self.overlay:
                     self.overlay.set_status("Template capture cancelled or failed.")
@@ -1432,204 +1197,7 @@ class HotkeyManager(threading.Thread):
                 f"Calibration saved: Inventory={inv_key}, TekCancel={tek_key}\nTemplate={tmpl_path}"
             )
 
-    def _wait_and_capture_template(self) -> Optional[Path]:
-        """Wait for F8 press and capture a small region around the cursor.
-
-        Returns the saved Path on success, or None on failure/cancel.
-        """
-        # Wait for F8
-        while True:
-            is_down_f8 = bool(user32.GetAsyncKeyState(0x77) & 0x8000)
-            if is_down_f8:
-                break
-            self._maybe_exit_on_f10()
-            time.sleep(0.02)
-        # Debounce: wait for release
-        while bool(user32.GetAsyncKeyState(0x77) & 0x8000):
-            self._maybe_exit_on_f10()
-            time.sleep(0.02)
-
-        try:
-            x, y = _cursor_pos()
-        except Exception:
-            return None
-
-        # Capture rectangle around cursor (width x height)
-        w, h = 220, 50
-        left = x - w // 2
-        top = y - h // 2
-
-        with mss.mss() as sct:
-            # Clamp to virtual screen bounds (monitors[0] is the virtual bounding box)
-            vb = sct.monitors[0]
-            left = max(vb["left"], min(left, vb["left"] + vb["width"] - w))
-            top = max(vb["top"], min(top, vb["top"] + vb["height"] - h))
-
-            region = {"left": int(left), "top": int(top), "width": int(w), "height": int(h)}
-            img = np.array(sct.grab(region))  # BGRA
-            bgr = img[:, :, :3]
-
-        # Compute output path under per-user app data directory (same base as config.ini)
-        # Example on Windows: %APPDATA%/Gangware/templates/search_bar.png
-        base_dir = self.config_manager.config_path.parent
-        out_dir = base_dir / "templates"
-        out_dir.mkdir(parents=True, exist_ok=True)
-        out_path = out_dir / "search_bar.png"
-        try:
-            cv2.imwrite(str(out_path), bgr)
-            return out_path
-        except Exception:
-            return None
-
     # --------------------------- Keyboard capture helpers ----------------------------
-    def _vk_name(self, vk: int) -> str:
-        """Return a human-readable name for common virtual key codes.
-
-        Kept as an instance method so it can be unit-tested separately.
-        """
-        # Mouse buttons
-        mouse_map = {1: "left", 2: "right", 4: "middle", 5: "xbutton1", 6: "xbutton2"}
-        if vk in mouse_map:
-            return mouse_map[vk]
-        # Letters
-        if 0x41 <= vk <= 0x5A:
-            return chr(vk)
-        # Numbers
-        if 0x30 <= vk <= 0x39:
-            return chr(vk)
-        # Function keys
-        if 0x70 <= vk <= 0x87:
-            return f"F{vk - 0x6F}"
-        # Common special keys (pydirectinput-friendly names)
-        special = {
-            0x1B: "esc",
-            0x20: "space",
-            0x09: "tab",
-            0x0D: "enter",
-            0x10: "shift",
-            0x11: "ctrl",
-            0x12: "alt",
-            0x08: "backspace",
-            0x2D: "insert",
-            0x2E: "delete",
-            0x24: "home",
-            0x23: "end",
-            0x21: "pageup",
-            0x22: "pagedown",
-            0x2C: "printscreen",
-            0x14: "capslock",
-            0x90: "numlock",
-            0x91: "scrolllock",
-        }
-        # Arrow keys (names expected by pydirectinput)
-        arrows = {0x25: "left", 0x26: "up", 0x27: "right", 0x28: "down"}
-        if vk in arrows:
-            return arrows[vk]
-        # Numpad digits
-        if 0x60 <= vk <= 0x69:
-            return f"num{vk - 0x60}"
-        return special.get(vk, f"vk_{vk}")
-
-    def _wait_key_release(self, vk: int, timeout: float = 1.0) -> None:
-        """Wait for a virtual key to be released, with timeout protection."""
-        if user32 is None:
-            return
-        import time as _t
-        end = _t.time() + max(0.0, float(timeout))
-        while _t.time() < end:
-            try:
-                if not bool(user32.GetAsyncKeyState(vk) & 0x8000):
-                    break
-            except Exception:
-                break
-            _t.sleep(0.02)
-
-    def _capture_input_windows(self, prompt: str) -> Optional[str]:
-        """Poll GetAsyncKeyState until a valid key or mouse button is pressed.
-
-        Returns a string like 'key_A' or 'mouse_xbutton1', or '__restart__'
-        when the user presses Escape to clear and re-enter.
-        """
-        if self.overlay:
-            self.overlay.prompt_key_capture(prompt)
-
-        while True:
-            # Scan a reasonable range of virtual-key codes
-            for vk in range(1, 256):
-                state = user32.GetAsyncKeyState(vk)
-                if state & 0x8000:
-                    result = self._process_pressed_vk(vk)
-                    if result == "__debounce__":
-                        # Debounce delay handled in helper; continue polling
-                        break
-                    return result
-            self._maybe_exit_on_f10()
-            time.sleep(0.02)
-
-    def _process_pressed_vk(self, vk: int) -> Optional[str]:
-        """Map a pressed virtual-key into a token or control signal.
-
-        Returns one of:
-        - 'mouse_x...' or 'key_X' for a valid input
-        - '__restart__' when Esc was pressed
-        - '__debounce__' for ignored inputs
-        """
-        name = self._vk_name(vk)
-        if self._is_exit_key(name):
-            self._handle_exit()
-        if self._is_ignored_during_calibration(name):
-            time.sleep(0.05)
-            return "__debounce__"
-        # Allow any mouse button, including left/right; no disallowance
-        if name == "esc":
-            self._notify_cleared()
-            return "__restart__"
-        if self._is_mouse_vk(vk):
-            return f"mouse_{name}"
-        return f"key_{name}"
-
-    @staticmethod
-    def _is_exit_key(name: str) -> bool:
-        return name == "F10"
-
-    @staticmethod
-    def _is_ignored_during_calibration(name: str) -> bool:
-        return name in ("F1", "F7", "F8")
-
-    @staticmethod
-    def _is_disallowed_mouse(name: str) -> bool:
-        # No longer disallow left/right; keep for backward-compat callers
-        return False
-
-    @staticmethod
-    def _is_mouse_vk(vk: int) -> bool:
-        return vk in (1, 2, 4, 5, 6)
-
-    def _handle_exit(self) -> None:
-        try:
-            self._log(self._MSG_EXIT)
-            try:
-                self.task_queue.put_nowait(None)
-            except Exception:
-                pass
-        finally:
-            os._exit(0)
-
-    def _notify_left_right_disallowed(self) -> None:
-        try:
-            if self.overlay:
-                self.overlay.set_status(
-                    "Left/Right click not allowed — use another button or a keyboard key."
-                )
-        except Exception:
-            pass
-
-    def _notify_cleared(self) -> None:
-        try:
-            if self.overlay:
-                self.overlay.set_status("Cleared current value — press a new key or button.")
-        except Exception:
-            pass
 
     def _prompt_until_valid(self, prompt: str) -> Optional[str]:
         """Prompt the user repeatedly until a non-restart value is captured.
@@ -1637,7 +1205,7 @@ class HotkeyManager(threading.Thread):
         Returns the captured token, or None on unrecoverable failure.
         """
         while True:
-            token = self._capture_input_windows(prompt)
+            token = capture_input_windows(prompt, self.overlay)
             if not token:
                 return None
             if token == "__restart__":
@@ -3223,7 +2791,7 @@ class HotkeyManager(threading.Thread):
                 self.overlay.set_status("Open your inventory, hover the search bar, then press F8 to capture.")
             except Exception:
                 pass
-        p = self._wait_and_capture_template()
+        p = wait_and_capture_template(self.config_manager, self.overlay)
         ok = bool(p)
         if ok:
             try:

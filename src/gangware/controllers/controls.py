@@ -5,6 +5,7 @@ Handles all input automation tasks.
 import sys
 import logging
 import pydirectinput
+import os
 
 try:  # Windows-specific for XBUTTON support
     import ctypes  # type: ignore
@@ -24,6 +25,21 @@ class InputController:
             _pdi.PAUSE = 0.0
         except Exception:
             pass
+        # Movement behavior (tunable via env)
+        try:
+            # Default to a short smooth move; override via GW_MOUSE_MOVE_DURATION
+            self._move_duration = float(os.getenv("GW_MOUSE_MOVE_DURATION", "0.08") or 0.08)  # seconds
+        except Exception:
+            self._move_duration = 0.08
+        try:
+            # Default to skipping verify to avoid micro-corrections during visual automation
+            self._skip_verify = str(os.getenv("GW_MOUSE_SKIP_VERIFY", "1")).lower() in ("1", "true", "yes")
+        except Exception:
+            self._skip_verify = True
+        try:
+            self._verify_tol = int(os.getenv("GW_MOUSE_VERIFY_TOL", "2") or 2)
+        except Exception:
+            self._verify_tol = 2
 
     # ---- internal helpers to keep cognitive complexity low ----
     @staticmethod
@@ -88,9 +104,16 @@ class InputController:
         # Debug: Log mouse movement attempt
         current_x, current_y = self._get_mouse_pos()
         logger.info("mouse: attempting move from (%s,%s) to (%d,%d)", current_x, current_y, xi, yi)
+        try:
+            logger.debug("mouse: move cfg duration=%.3f verify=%s tol=%d", float(self._move_duration or 0.0), str(self._skip_verify is False), int(self._verify_tol or 0))
+        except Exception:
+            pass
 
         try:
-            pydirectinput.moveTo(xi, yi)
+            if self._move_duration and float(self._move_duration) > 0.0:
+                pydirectinput.moveTo(xi, yi, duration=float(self._move_duration))
+            else:
+                pydirectinput.moveTo(xi, yi)
             logger.info("mouse: pydirectinput.moveTo completed")
         except Exception as e:
             logger.exception("mouse: moveTo failed: %s", e)
@@ -103,8 +126,10 @@ class InputController:
         # Debug: Check final position
         final_x, final_y = self._get_mouse_pos()
         logger.info("mouse: final position (%s,%s)", final_x, final_y)
-
-        self._ensure_position(xi, yi, tol=2)
+        if not getattr(self, "_skip_verify", False):
+            self._ensure_position(xi, yi, tol=int(getattr(self, "_verify_tol", 2)))
+        else:
+            logger.debug("mouse: skipped verify step")
 
     def click(self):
         """
@@ -153,8 +178,11 @@ class InputController:
             XBUTTON2 = 0x0002
             data = XBUTTON1 if btn == "xbutton1" else XBUTTON2
             try:
-                _loop(presses, lambda: (_user32.mouse_event(MOUSEEVENTF_XDOWN, 0, 0, data, 0),
-                                        _user32.mouse_event(MOUSEEVENTF_XUP, 0, 0, data, 0)))
+                u32 = _user32
+                if u32 is None:
+                    return False
+                _loop(presses, lambda: (u32.mouse_event(MOUSEEVENTF_XDOWN, 0, 0, data, 0),
+                                        u32.mouse_event(MOUSEEVENTF_XUP, 0, 0, data, 0)))
                 return True
             except Exception:
                 return False
@@ -171,8 +199,11 @@ class InputController:
             if down_flag is None:
                 return False
             try:
-                _loop(presses, lambda: (_user32.mouse_event(down_flag, 0, 0, 0, 0),
-                                        _user32.mouse_event(up_flag, 0, 0, 0, 0)))
+                u32 = _user32
+                if u32 is None:
+                    return False
+                _loop(presses, lambda: (u32.mouse_event(down_flag, 0, 0, 0, 0),
+                                        u32.mouse_event(up_flag, 0, 0, 0, 0)))
                 return True
             except Exception:
                 return False
@@ -189,23 +220,36 @@ class InputController:
 
         # Try in order: extended buttons via Win32, standard L/R/M via Win32, PDI-specific, then fallback left
         if _click_win32_xbutton():
+            px, py = self._get_mouse_pos()
             logger.info("mouse: click completed via Win32 xbutton")
+            logger.info("mouse: click position (%s,%s)", px, py)
             return
         if _click_win32_standard():
+            px, py = self._get_mouse_pos()
             logger.info("mouse: click completed via Win32 standard")
+            logger.info("mouse: click position (%s,%s)", px, py)
             return
         if _click_pdi_specific():
+            px, py = self._get_mouse_pos()
             logger.info("mouse: click completed via pydirectinput")
+            logger.info("mouse: click position (%s,%s)", px, py)
             return
         # Last resort: attempt left-click via PDI (and native left if PDI fails inside loop)
         try:
             _fallback_left()
+            px, py = self._get_mouse_pos()
             logger.info("mouse: click completed via fallback left")
+            logger.info("mouse: click position (%s,%s)", px, py)
         except Exception:
             if sys.platform == "win32" and _user32 is not None:
                 try:
-                    _loop(presses, lambda: (_user32.mouse_event(0x0002, 0, 0, 0, 0), _user32.mouse_event(0x0004, 0, 0, 0, 0)))
+                    u32 = _user32
+                    if u32 is None:
+                        return
+                    _loop(presses, lambda: (u32.mouse_event(0x0002, 0, 0, 0, 0), u32.mouse_event(0x0004, 0, 0, 0, 0)))
+                    px, py = self._get_mouse_pos()
                     logger.info("mouse: click completed via Win32 fallback")
+                    logger.info("mouse: click position (%s,%s)", px, py)
                 except Exception:
                     logger.warning("mouse: all click methods failed")
                     pass
@@ -440,11 +484,8 @@ class InputController:
                     pass
             self._sleep(0.015)
         except Exception:
-            # If anything above failed unexpectedly, try library hotkey once
-            try:
-                pydirectinput.hotkey(*seq)
-            except Exception:
-                pass
+            # Swallow and proceed to releasing modifiers; best-effort only
+            pass
         finally:
             # Release modifiers in reverse order
             for k in reversed(seq[:-1]):

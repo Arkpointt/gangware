@@ -1,13 +1,13 @@
 # Gangware
-## Advanced Computer Vision Automation for ARK: Survival Evolved
+## Advanced Computer Vision Automation for ARK: Survival Ascended
 
-**Version 4.0** - Professional Performance-Optimized Gaming Assistant
+**Version 6.2** - Modular, Testable, Session-Logged Automation
 
 [![Python](https://img.shields.io/badge/Python-3.11+-blue.svg)](https://python.org)
 [![OpenCV](https://img.shields.io/badge/OpenCV-Computer%20Vision-green.svg)](https://opencv.org)
 [![PyQt6](https://img.shields.io/badge/PyQt6-GUI%20Framework-orange.svg)](https://www.riverbankcomputing.com/software/pyqt/)
 
-Gangware is a high-performance automation system designed specifically for ARK: Survival Evolved, featuring sub-second armor swapping, intelligent computer vision, and advanced macro capabilities. Built with professional-grade optimization techniques, Gangware delivers lightning-fast equipment management and combat automation.
+Gangware is a high-performance automation system designed specifically for ARK: Survival Ascended, featuring sub-second armor swapping, intelligent computer vision, and advanced macro capabilities. Built with professional-grade optimization techniques, Gangware delivers lightning-fast equipment management and combat automation.
 
 ---
 
@@ -45,7 +45,7 @@ Gangware is a high-performance automation system designed specifically for ARK: 
 - **Windows 10/11** (DirectX screen capture)
 - **Python 3.11+**
 - **Multi-monitor compatible**
-- **ARK: Survival Evolved** (any resolution)
+- **ARK: Survival Ascended** (any resolution)
 
 ### Installation
 
@@ -55,17 +55,17 @@ git clone <repository-url>
 cd Gangware
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
+pip install -r build/requirements.txt
 ```
 
 2. **Launch Application**:
 ```powershell
-python main.py
+python -m gangware.main
 ```
 
 3. **Initial Calibration**:
    - Press **F1** to open the overlay
-   - Navigate to **Calibration** tab
+   - Navigate to **Debug** tab
    - Follow the setup wizard for keybind and template capture
    - Use **F6** to capture your custom inventory region for maximum speed
 
@@ -76,14 +76,25 @@ python main.py
 | Hotkey | Function | Description |
 |--------|----------|-------------|
 | **F1** | Toggle Overlay | Show/hide main interface |
-| **F2** | Smart Armor Swap | Sub-second helmet/armor equipment |
-| **F3** | Tek Dash Combo | Advanced movement sequence |
-| **F4** | Medbrew Cycle | Intelligent healing management |
-| **F6** | Capture ROI | Manual inventory region capture |
-| **F7** | Recalibrate | Reset vision calibration |
+| **F2** | Equip Flak Set | Searches and equips flak armor from inventory |
+| **F3** | Equip Tek Set | Searches and equips Tek armor from inventory |
+| **F4** | Equip Mixed Set | Searches and equips mixed set from inventory |
+| **Shift+Q** | Medbrew Burst | Quick consumption burst |
+| **Shift+E** | Medbrew HoT Toggle | Background thread toggles healing-over-time |
+| **Shift+R** | Tek Punch (Tek Dash) | Executes Tek punch sequence |
+| **F6** | Capture ROI | Manual inventory region capture (two-press corner selection) |
+| **F7** | Recalibrate / SIM Capture | Opens calibration UI; when SIM calibration is active, captures a point |
+| **F9** | Stop SIM Calibration | Ends SIM capture mode and restores overlay |
+| **F11** | Start/Stop Auto SIM | Global toggle to start/stop SIM and hide/show overlay |
 | **F10** | Exit | Graceful application shutdown |
 
 ---
+
+## 🧭 Auto SIM Usage
+- Open the SIM tab in the overlay.
+- Enter your server code (e.g., 2133).
+- Press Start, or use the global hotkey F11 to start/stop the SIM and auto-hide/show the overlay.
+- SIM Calibration: click "Start (use F7)" on the SIM tab, then press F7 to log cursor coordinates as needed; press F9 to stop.
 
 ## ⚙️ Advanced Configuration
 
@@ -124,43 +135,56 @@ For maximum performance, capture a custom inventory region:
 
 ## 🏗️ Architecture
 
-2. (Optional) Enable UI demo in `config/config.ini` by setting `ui_demo = True` under `[Settings]` to see live status updates.
+### Module boundaries (v6.2)
+- core/hotkeys/hook.py: Windows RegisterHotKey + message pump; used by HotkeyManager
+- config/hotkeys.py: centralized VK codes, modifiers, and ID→label map
+- core/win32/utils.py: cursor pos, Ark window rects/title/process, foreground exe, ROI rel↔abs, ensure_ark_foreground
+- core/roi/service.py: two-press F6 ROI flow (first-press hint, clamp, rel+abs persistence, snapshot, overlay updates)
+- features/debug/template.py: wait_and_capture_template for F8 search-bar capture
+- features/debug/keys.py: capture_input_windows and wait_key_release (Esc restart; ignores F1/F7/F8)
+- gui/overlay.py: thread-safe feedback API (flash/set active/clear) via signals; SIM tab with start/stop and calibration signals; no business logic
+- core/hotkey_manager.py: thin orchestration (handlers, Ark foreground checks, overlay feedback)
 
-3. Run the app:
+### Logging & artifacts
+- Session-based logging in %APPDATA%/Gangware/logs/session-YYYYmmdd_HHMMSS/
+- INFO for transitions/decisions; DEBUG for ROI math/coords; artifacts only on detection failures
+
+### Run the app
 
 ```powershell
-python main.py
+python -m gangware.main
 ```
 
 Or alternatively use the batch script:
 
 ```powershell
-.\run.bat
+.\tools\scripts\run.bat
 ```
 
-Calibration flow (Windows)
+Debug tools (Windows)
 --------------------------
 If calibration is not complete, the overlay will guide you through these steps:
-1) Press your Inventory key (keyboard or mouse). Left/Right mouse buttons are not allowed. Middle/X buttons are accepted.
-2) Press your Tek Punch Cancel key (keyboard or mouse). Same restrictions as above.
+1) Press your Inventory key (keyboard or mouse). Left/Right mouse buttons are allowed; Middle/X buttons are accepted.
+2) Press your Tek Punch Cancel key (keyboard or mouse).
 3) Open your inventory, hover the search bar, and press F8 to capture a small template image. The template is saved to `%APPDATA%/Gangware/templates/search_bar.png` (per-user) and its absolute path recorded in the config.
 
-Calibration is marked complete only after the template is captured and saved.
+Setup is marked complete only after the template is captured and saved.
 
 Overlay behavior
 ----------------
-- The overlay is always on top, click-through, and anchored to the top-right corner of the active screen.
+- The overlay is always on top, anchored to the top-right corner of the active screen.
+- Thread-safe API: background threads use overlay.set_status_safe, set_visible_safe, flash_hotkey_line, set_hotkey_line_active, clear_hotkey_line_active
 ### Testing & Quality Assurance
 ```powershell
 # Run test suite
 python -m pytest tests/ -v
 
-# Style and complexity analysis
-python -m flake8 src/
-python -m bandit -r src/
+# Linting and types
+ruff check src/
+mypy src/
 
-# Performance profiling
-python main.py --debug-timing
+# Performance profiling (enable session timing in logs)
+$env:GW_VISION_PERF = "1"; python -m gangware.main
 ```
 
 ### Contributing
@@ -171,6 +195,9 @@ python main.py --debug-timing
 5. **Submit pull request** with detailed performance analysis
 
 ---
+
+## 📚 Guides and Advanced Topics
+- Enhanced Server Detection Deep Dive: docs/guides/enhanced_server_detection.md
 
 ## 📊 Technical Specifications
 
@@ -209,4 +236,4 @@ For technical support, performance optimization, or feature requests:
 
 ---
 
-**Gangware v4.0** - Where performance meets precision in ARK automation.
+**Gangware v6.2** - Modular, observable, and fast. Where performance meets precision in ARK automation.

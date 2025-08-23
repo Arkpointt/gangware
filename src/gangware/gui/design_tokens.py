@@ -1,5 +1,6 @@
-"""Design tokens for Gangware UI (single source of truth).
-Do not change values here without updating the blueprint and tests.
+"""Design tokens for the Gangware UI.
+
+Single source of truth for UI colors, sizes, fonts, and spacing.
 """
 
 # Global scale (0.72 ≈ 28% reduction). All px tokens derive from BASE * UI_SCALE

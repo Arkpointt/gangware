@@ -5,12 +5,13 @@ from typing import Optional, List, Tuple
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QMainWindow, QPushButton, QStackedWidget,
-    QGraphicsDropShadowEffect, QFrame, QSizePolicy, QLineEdit
+    QGraphicsDropShadowEffect, QFrame, QSizePolicy
 )
 from PyQt6.QtGui import QColor, QGuiApplication, QFontDatabase, QFont
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject
 
 from .design_tokens import STATUS_OK, UI_SCALE
+
 
 
 def spx(n: int) -> int:
@@ -37,14 +38,15 @@ class OverlaySignals(QObject):
     capture_tek = pyqtSignal()
     capture_template = pyqtSignal()
     capture_roi = pyqtSignal()
-    # Auto Sim signals
-    sim_start = pyqtSignal(str)
-    sim_stop = pyqtSignal()
-    sim_cal_start = pyqtSignal()
-    sim_cal_cancel = pyqtSignal()
+    # Hotkey line feedback signals (GUI-thread safe)
+    flash_hotkey_line = pyqtSignal(str)
+    set_hotkey_line_active = pyqtSignal(str)
+    clear_hotkey_line_active = pyqtSignal(str, int)
     # Thread-safe UI control signals
     _set_visible_sig = pyqtSignal(bool)
     _set_status_sig = pyqtSignal(str)
+    # Thread-safe toggle visibility
+    _toggle_visible_sig = pyqtSignal()
 
 
 class OverlayWindow(QMainWindow):
@@ -55,9 +57,9 @@ class OverlayWindow(QMainWindow):
     def __init__(self, calibration_mode: bool = False, message: Optional[str] = None):
         super().__init__()
         # State
-        self._cal_boxes: dict[str, QLabel] = {}
+        self._cal_boxes = {}
+        self._hotkey_btns = {}
         self._start_emitted = False
-        self._sim_running = False
 
         # Window flags and transparency
         self.setWindowFlags(
@@ -72,6 +74,11 @@ class OverlayWindow(QMainWindow):
         self.signals = OverlaySignals(self)
         self.signals._set_visible_sig.connect(self.set_visible)
         self.signals._set_status_sig.connect(self.set_status)
+        self.signals._toggle_visible_sig.connect(self.toggle_visibility)
+        # GUI-thread safe hotkey feedback wiring
+        self.signals.flash_hotkey_line.connect(self._flash_hotkey_line_ui)
+        self.signals.set_hotkey_line_active.connect(self._set_hotkey_line_active_ui)
+        self.signals.clear_hotkey_line_active.connect(self._clear_hotkey_line_active_ui)
 
         # Root card container
         card = QWidget()
@@ -105,12 +112,10 @@ class OverlayWindow(QMainWindow):
         tabs = QHBoxLayout(tabs_row)
         tabs.setContentsMargins(0, 0, 0, 0)
         tabs.setSpacing(spx(8))
-        self.btn_main_tab = self._nav_button("MAIN", True)
-        self.btn_cal_tab = self._nav_button("CALIBRATION", False)
-        self.btn_sim_tab = self._nav_button("SIM", False)
+        self.btn_main_tab = self._nav_button("COMBAT", True)
+        self.btn_cal_tab = self._nav_button("DEBUG", False)
         tabs.addWidget(self.btn_main_tab)
         tabs.addWidget(self.btn_cal_tab)
-        tabs.addWidget(self.btn_sim_tab)
         tabs.addStretch(1)
         root.addWidget(tabs_row)
 
@@ -118,10 +123,8 @@ class OverlayWindow(QMainWindow):
         self.stack = QStackedWidget()
         self.page_main = self._page_main()
         self.page_cal = self._page_calibration()
-        self.page_sim = self._page_sim()
         self.stack.addWidget(self.page_main)
         self.stack.addWidget(self.page_cal)
-        self.stack.addWidget(self.page_sim)
         root.addWidget(self.stack)
 
         # Footer
@@ -134,7 +137,6 @@ class OverlayWindow(QMainWindow):
         # Wire tab switching
         self.btn_main_tab.clicked.connect(lambda: self._switch_tab(0))
         self.btn_cal_tab.clicked.connect(lambda: self._switch_tab(1))
-        self.btn_sim_tab.clicked.connect(lambda: self._switch_tab(2))
         self._switch_tab(1 if calibration_mode else 0)
 
         # Fonts and styles
@@ -152,7 +154,6 @@ class OverlayWindow(QMainWindow):
         self.stack.setCurrentIndex(idx)
         self.btn_main_tab.setChecked(idx == 0)
         self.btn_cal_tab.setChecked(idx == 1)
-        self.btn_sim_tab.setChecked(idx == 2)
 
     def _page_main(self) -> QWidget:
         page = QWidget()
@@ -226,96 +227,6 @@ class OverlayWindow(QMainWindow):
         lay.addWidget(vs)
         return inner
 
-    def _page_sim(self) -> QWidget:
-        page = QWidget()
-        outer = QVBoxLayout(page)
-        outer.setContentsMargins(0, 0, 0, 0)
-        outer.setSpacing(spx(14))
-
-        section = QFrame()
-        section.setObjectName("section")
-        glow(section, self.CYAN, 22, 70)
-        v = QVBoxLayout(section)
-        v.setContentsMargins(spx(12), spx(10), spx(12), spx(10))
-        v.setSpacing(spx(10))
-
-        t = QLabel("AUTO SIM")
-        t.setObjectName("sectionTitle")
-        glow(t, self.ORANGE, 18, 130)
-        v.addWidget(t)
-
-        row = QWidget()
-        h = QHBoxLayout(row)
-        h.setContentsMargins(0, 0, 0, 0)
-        h.setSpacing(spx(10))
-        lbl = QLabel("Server code:")
-        lbl.setObjectName("item")
-        h.addWidget(lbl)
-
-        self.sim_input = QLineEdit()
-        self.sim_input.setPlaceholderText("e.g. 2133")
-        self.sim_input.setMaxLength(12)
-        self.sim_input.setObjectName("input")
-        h.addWidget(self.sim_input, 1)
-
-        btn_start = QPushButton("Start")
-        btn_start.setObjectName("smallBtn")
-        btn_start.setCursor(Qt.CursorShape.PointingHandCursor)
-        glow(btn_start, self.CYAN, 20, 100)
-        h.addWidget(btn_start)
-        # Keep a handle and disable until input present
-        self.btn_sim_start = btn_start
-        self.btn_sim_start.setEnabled(False)
-
-        btn_stop = QPushButton("Stop")
-        btn_stop.setObjectName("smallBtn")
-        btn_stop.setCursor(Qt.CursorShape.PointingHandCursor)
-        glow(btn_stop, self.CYAN, 20, 100)
-        h.addWidget(btn_stop)
-        v.addWidget(row)
-
-        hint_row = QWidget()
-        hint_layout = QHBoxLayout(hint_row)
-        hint_layout.setContentsMargins(0, 0, 0, 0)
-        hint_layout.setSpacing(spx(8))
-        hint_label = QLabel("Hotkey: Press F11 to Start/Stop the Sim")
-        hint_label.setObjectName("item")
-        hint_layout.addWidget(hint_label)
-        hint_layout.addStretch(1)
-        v.addWidget(hint_row)
-
-        row2 = QWidget()
-        h2 = QHBoxLayout(row2)
-        h2.setContentsMargins(0, 0, 0, 0)
-        h2.setSpacing(spx(10))
-        lbl2 = QLabel("SIM Calibration:")
-        lbl2.setObjectName("item")
-        h2.addWidget(lbl2)
-        btn_cal = QPushButton("Start (use F7)")
-        btn_cal.setObjectName("smallBtn")
-        btn_cal.setCursor(Qt.CursorShape.PointingHandCursor)
-        glow(btn_cal, self.CYAN, 20, 100)
-        h2.addWidget(btn_cal)
-        btn_cancel = QPushButton("Cancel")
-        btn_cancel.setObjectName("smallBtn")
-        btn_cancel.setCursor(Qt.CursorShape.PointingHandCursor)
-        glow(btn_cancel, self.CYAN, 20, 100)
-        h2.addWidget(btn_cancel)
-        h2.addStretch(1)
-        v.addWidget(row2)
-
-        outer.addWidget(section)
-
-        # Wire events
-        btn_start.clicked.connect(self._emit_sim_start)
-        btn_stop.clicked.connect(self._emit_sim_stop)
-        btn_cal.clicked.connect(self._emit_sim_cal_start)
-        btn_cancel.clicked.connect(self._emit_sim_cal_cancel)
-        # Enable Start only when input present
-        self.sim_input.textChanged.connect(self._update_sim_controls)
-        self._update_sim_controls()
-        return page
-
     # ------ Building blocks ------
     def _section(self, title: str, items: List[Tuple[str, str]]):
         frame = QFrame()
@@ -343,6 +254,11 @@ class OverlayWindow(QMainWindow):
             btn.setEnabled(False)
             btn.setCursor(Qt.CursorShape.ArrowCursor)
             glow(btn, self.CYAN, 20, 100)
+            # Track buttons by hotkey label for feedback effects
+            try:
+                self._hotkey_btns[key] = btn
+            except Exception:
+                pass
             h.addWidget(btn)
             v.addWidget(row)
         return frame
@@ -387,8 +303,10 @@ class OverlayWindow(QMainWindow):
         box.setFixedWidth(spx(140))
         box.setFixedHeight(spx(36))
         box.setProperty("state", "pending")
-        box.style().unpolish(box)
-        box.style().polish(box)
+        _st = box.style()
+        if _st is not None:
+            _st.unpolish(box)
+            _st.polish(box)
         self._cal_boxes[key] = box
 
         h.addWidget(name_lbl, 1)
@@ -434,8 +352,9 @@ class OverlayWindow(QMainWindow):
                 out_path = theme_builder.build()
                 qss = Path(out_path).read_text(encoding="utf-8")
             self.setStyleSheet(qss)
-        except Exception as e:
-            print(f"Failed to apply themed stylesheet: {e}")
+        except Exception:
+            import logging
+            logging.getLogger(__name__).exception("Failed to apply themed stylesheet")
 
     # ------ Public API (signals wiring expected by main/hotkey manager) ------
     def on_recalibrate(self, slot): self.signals.recalibrate.connect(slot)
@@ -444,10 +363,6 @@ class OverlayWindow(QMainWindow):
     def on_capture_tek(self, slot): self.signals.capture_tek.connect(slot)
     def on_capture_template(self, slot): self.signals.capture_template.connect(slot)
     def on_capture_roi(self, slot): self.signals.capture_roi.connect(slot)
-    def on_sim_start(self, slot): self.signals.sim_start.connect(slot)
-    def on_sim_stop(self, slot): self.signals.sim_stop.connect(slot)
-    def on_sim_cal_start(self, slot): self.signals.sim_cal_start.connect(slot)
-    def on_sim_cal_cancel(self, slot): self.signals.sim_cal_cancel.connect(slot)
 
     # ------ External UI updates ------
     def set_captured_inventory(self, token: str) -> None:
@@ -480,8 +395,10 @@ class OverlayWindow(QMainWindow):
             box.setText(self.NONE_DISPLAY)
             box.setToolTip("")
             box.setProperty("state", "pending")
-        box.style().unpolish(box)
-        box.style().polish(box)
+        _st2 = box.style()
+        if _st2 is not None:
+            _st2.unpolish(box)
+            _st2.polish(box)
         self._update_start_enabled()
 
     def set_roi_status(self, ok: bool, roi_text: Optional[str] = None) -> None:
@@ -505,8 +422,10 @@ class OverlayWindow(QMainWindow):
         if "calibration complete" in t.lower():
             t = "STATUS: OPERATIONAL"
             self.status_label.setProperty("variant", "operational")
-            self.status_label.style().unpolish(self.status_label)
-            self.status_label.style().polish(self.status_label)
+            _st3 = self.status_label.style()
+            if _st3 is not None:
+                _st3.unpolish(self.status_label)
+                _st3.polish(self.status_label)
         self.status_label.setText(t)
         self.status_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
 
@@ -522,10 +441,20 @@ class OverlayWindow(QMainWindow):
     def set_visible_safe(self, visible: bool) -> None:
         self.signals._set_visible_sig.emit(bool(visible))
 
-    def switch_to_calibration(self) -> None:
+    def toggle_visibility_safe(self) -> None:
+        try:
+            self.signals._toggle_visible_sig.emit()
+        except Exception:
+            pass
+
+    def switch_to_debug(self) -> None:
         self._start_emitted = False
         self._switch_tab(1)
         self._update_start_enabled()
+
+    # Backward-compatible alias for existing callers
+    def switch_to_calibration(self) -> None:
+        self.switch_to_debug()
 
     def switch_to_main(self) -> None:
         self._switch_tab(0)
@@ -545,59 +474,76 @@ class OverlayWindow(QMainWindow):
     def toggle_visibility(self) -> None:
         self.setVisible(not self.isVisible())
 
-    # ------ SIM helpers ------
-    def _get_server_code(self) -> str:
-        return self.sim_input.text().strip() if hasattr(self, 'sim_input') and self.sim_input is not None else ''
+    # ------ Hotkey line feedback API ------
+    def flash_hotkey_line(self, hotkey: str) -> None:
+        """Thread-safe: briefly flash the row button for the given hotkey label.
+        Expected labels include: 'Shift+R', 'Shift+E', 'F2', 'F3', 'F4'.
+        """
+        try:
+            self.signals.flash_hotkey_line.emit(str(hotkey))
+        except Exception:
+            pass
 
-    def _emit_sim_start(self):
-        code = self._get_server_code()
-        if not code:
-            # Guard: do not start without a server code
-            self.set_status("Enter a server number to start SIM.")
-            # keep overlay visible for user to enter code
-            self.set_visible(True)
+    def set_hotkey_line_active(self, hotkey: str) -> None:
+        """Thread-safe: mark the hotkey line as active (e.g., for long-running toggles)."""
+        try:
+            self.signals.set_hotkey_line_active.emit(str(hotkey))
+        except Exception:
+            pass
+
+    def clear_hotkey_line_active(self, hotkey: str, fade_duration_ms: int = 400) -> None:
+        """Thread-safe: clear the active state after an optional fade delay."""
+        try:
+            ms = int(fade_duration_ms)
+        except Exception:
+            ms = 400
+        try:
+            self.signals.clear_hotkey_line_active.emit(str(hotkey), ms)
+        except Exception:
+            pass
+
+    # UI-slot implementations for feedback
+    def _flash_hotkey_line_ui(self, hotkey: str) -> None:
+        btn = self._hotkey_btns.get(str(hotkey))
+        if not btn:
             return
-        self.set_status(f"SIM: Start clicked with code '{code}'")
-        self.signals.sim_start.emit(code)
-        self._sim_running = True
+        prev = btn.styleSheet()
+        try:
+            btn.setStyleSheet("background-color: rgba(0, 221, 255, 0.30);")
+        except Exception:
+            pass
+        QTimer.singleShot(220, lambda: btn.setStyleSheet(prev))
 
-    def _emit_sim_stop(self):
-        self.set_status("SIM: Stop clicked")
-        self.signals.sim_stop.emit()
-        self._sim_running = False
+    def _set_hotkey_line_active_ui(self, hotkey: str) -> None:
+        btn = self._hotkey_btns.get(str(hotkey))
+        if not btn:
+            return
+        try:
+            btn.setProperty("active", True)
+            btn.setStyleSheet("background-color: rgba(0, 200, 0, 0.45);")
+            btn.style().unpolish(btn)
+            btn.style().polish(btn)
+        except Exception:
+            pass
 
-    def request_sim_start_hotkey(self) -> None:
-        def _ui():
-            code = self._get_server_code()
-            if not code:
-                # Bring user to SIM tab and prompt for input
-                self._switch_tab(2)
-                self.set_visible(True)
-                self.set_status("Enter server number on SIM tab, then press F11.")
-                try:
-                    self.sim_input.setFocus()
-                except Exception:
-                    pass
-                return
-            # Hide overlay and start
-            self.set_visible(False)
-            self._emit_sim_start()
-        QTimer.singleShot(0, _ui)
-
-    def request_sim_stop_hotkey(self) -> None:
-        QTimer.singleShot(0, self._emit_sim_stop)
-        self.set_visible_safe(True)
-
-    def is_sim_running(self) -> bool:
-        return bool(self._sim_running)
-
-    def _emit_sim_cal_start(self):
-        self.set_status("SIM F7 Capture: Press F7 to log coords; press F9 to finish. Cancel to abort.")
-        self.signals.sim_cal_start.emit()
-
-    def _emit_sim_cal_cancel(self):
-        self.set_status("SIM Calibration: cancelled.")
-        self.signals.sim_cal_cancel.emit()
+    def _clear_hotkey_line_active_ui(self, hotkey: str, fade_duration_ms: int = 400) -> None:
+        btn = self._hotkey_btns.get(str(hotkey))
+        if not btn:
+            return
+        prev = btn.styleSheet()
+        try:
+            btn.setStyleSheet("background-color: rgba(0, 200, 0, 0.22);")
+        except Exception:
+            pass
+        def _reset():
+            try:
+                btn.setProperty("active", False)
+                btn.setStyleSheet(prev)
+                btn.style().unpolish(btn)
+                btn.style().polish(btn)
+            except Exception:
+                pass
+        QTimer.singleShot(int(max(0, fade_duration_ms)), _reset)
 
     def show_window(self):
         self.show()
@@ -627,14 +573,6 @@ class OverlayWindow(QMainWindow):
         if ready and not self._start_emitted:
             self._start_emitted = True
             self.signals.start.emit()
-
-    def _update_sim_controls(self):
-        try:
-            has_code = bool(self._get_server_code())
-            if hasattr(self, 'btn_sim_start') and self.btn_sim_start is not None:
-                self.btn_sim_start.setEnabled(has_code)
-        except Exception:
-            pass
 
     @staticmethod
     def _friendly_token(token: str) -> str:

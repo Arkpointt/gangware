@@ -57,7 +57,24 @@ class ConfigManager:
         self.save()
 
     def get(self, key: str, fallback=None):
-        """Return a value from the DEFAULT section or the provided fallback."""
+        """Get a configuration value with precedence: env > config.ini > fallback.
+
+        Env precedence checks the following keys in order and returns the first
+        non-empty result:
+        - GW_<KEY_UPPER>
+        - <KEY_UPPER>
+        - <key> (exact name)
+        """
+        try:
+            # Environment precedence (allows runtime overrides without editing files)
+            env_candidates = [f"GW_{str(key).upper()}", str(key).upper(), str(key)]
+            for ek in env_candidates:
+                val = os.environ.get(ek)
+                if val is not None and str(val) != "":
+                    return val
+        except Exception:
+            # Fall back silently to config.ini lookup
+            pass
         return self.config["DEFAULT"].get(key, fallback)
 
     def save(self) -> None:

@@ -1,0 +1,165 @@
+project:
+  name: Gangware
+  language: python
+  runtime: "Python 3.11+"
+
+governing_docs:
+  must_read:
+    - "Gangware Engineering Blueprint (docs/ or root copy)"
+  use_as_needed:
+    - "docs/RUNBOOK.md"
+    - "docs/TESTING.md"
+    - "docs/CONFIGURATION.md"
+    - "docs/SECURITY.md"
+    - "docs/adr/*"
+    - "docs/ADRs/ADR-0006-mypy-daemon-type-architecture.md" # Type checking standards
+
+defaults:
+  change_unit: changeset          # The AI proposes small, reviewable diffs you approve
+  require_review: true            # Human approval before merge to main
+  require_ci_green: true          # All CI checks must pass before merge
+  branch_strategy: "feature branches merged via PR into main"
+
+paths:
+  allowed_write_roots:
+    - "src/gangware/**"
+    - "tests/**"
+    - "docs/**"
+    - "assets/**"
+    - "config/**"
+    - ".github/**"                # workflows & templates only
+    - "pyproject.toml"
+    - "README.md"
+    - "LICENSE"
+    - ".gitignore"
+    - ".aipolicy.yml"
+  discouraged:
+    - "logs/**"                   # runtime output only
+    - ".artifacts/**"             # local/ignored temp storage only
+  placement_rules:
+    windows_specific_goes_in: "src/gangware/io/**"
+    shared_services_go_in:       "src/gangware/core/**"
+    feature_code_goes_in:        "src/gangware/features/**"
+
+commenting_policy:
+  intent_over_history: true       # comments explain intent/constraints/safety, not history
+  prohibit:
+    - "changelog-in-code"
+    - "dated notes (e.g., 'changed on 2025-08-22')"
+    - "author tags or ticket IDs"
+  require_when:
+    - "logic is non-obvious or enforces safety (ROI clamping, focus checks, DPI rules)"
+    - "assumptions/constraints apply (Ark windowing, UI scale, integrity level)"
+  update_on_behavior_change: true
+
+type_checking_policy:             # ADR-0006: MyPy daemon and type architecture
+  tool: "mypy with daemon (dmypy) for fast incremental checking"
+  architectural_over_suppression: true   # prefer design fixes over # type: ignore
+  optional_imports:
+    pattern: "variable annotation with Optional[Any]"
+    example: |
+      mss: Optional[Any]
+      try:
+          import mss
+      except ImportError:
+          mss = None
+  exceptions: "use ImportError not broad Exception for import failures"
+  ignore_comments: "discouraged - fix through better typing/design when possible"
+
+small_changeset:                  # Default behavior for proposals
+  max_files: 3
+  max_loc: 200
+  preview_required: true          # Show the diff before applying
+  explain_intent: "one sentence describing why and expected effect"
+  require_tests_when_behavior_changes: true
+  forbid_unrelated_reformatting: true
+  docs_updates_required_when:
+    - "user-visible behavior changes"
+    - "config/env keys change"
+    - "performance budgets are affected"
+  performance_guard:
+    p95_tolerance_percent: 10     # changeset must not push P95 > +10% over budget
+  placement_enforcement:
+    feature_local_tests_preferred: true
+    cross_feature_logic_must_move_to_core: true
+
+guided_refactor:                  # When a small changeset isn’t enough
+  allowed_when_any:
+    - "same area shows recurring issues"
+    - "module is too large/complex (≈ >1000 LOC) or needs decomposition"
+    - "cross-file consistency fix (names/types) across a few files (≈ ≤5)"
+    - "multi-site correctness/security issue"
+    - "algorithmic change required to meet performance budgets"
+  delivery_rules:
+    - "sequence of small, reviewable changesets (no big-bang rewrite)"
+    - "tests updated first or alongside"
+    - "public behavior preserved, or shims + deprecation notes if not"
+    - "update docs/blueprint if standards or behavior change"
+  label: "ai-change:refactor"
+
+replacement:                      # New implementation (rare)
+  allowed_when_at_least: 2
+  reasons:
+    - "architectural mismatch blocks goals"
+    - "security constraint cannot be reasonably mitigated"
+    - "hard performance ceiling requiring redesign"
+    - "repeated severe regressions over time"
+  requirements:
+    - "ADR with rationale, alternatives, and consequences"
+    - "feature flag (default OFF) + migration & rollback plan"
+    - "staged rollout (alpha/beta/stable) with perf/error SLOs"
+    - "tests and benchmarks against performance budgets"
+  label: "ai-change:replacement"
+
+platform_safety_guards:
+  windows:
+    focus_required: true          # never send input unless Ark window is foreground
+    dpi_rules: "Prefer 100% scaling; use Application DPI override if needed"
+    windowing: "Borderless windowed, fixed resolution, UI scale 1.0"
+    mouse_settings:
+      - "Disable Snap To"
+      - "Disable Enhance pointer precision"
+      - "Disable vendor macro drivers during automation"
+    multi_monitor: "Constrain cursor to Ark monitor during automation"
+
+security_privacy:
+  telemetry: "none"
+  input_simulation: "OS events only; no memory/code injection"
+  logs:
+    redact_pii: true
+    structure: "machine-parsable (JSON or key=value) with correlation IDs"
+    artifacts_on_failure_only: true
+
+doc_hygiene:
+  update_docs_with_code_changes: true
+  blueprint_is_authoritative: true
+  preferred_locations:
+    architecture: "docs/ARCHITECTURE.md"
+    runbook:       "docs/RUNBOOK.md"
+    testing:       "docs/TESTING.md"
+    security:      "docs/SECURITY.md"
+    adrs:          "docs/adr/"
+
+review_gate:
+  required_checks:
+    - "ruff (lint)"
+    - "black/isort (format on changed lines)"
+    - "mypy (type check) - prefer dmypy daemon for fast incremental checking"
+    - "pytest (tests/coverage as configured)"
+    - "pip-audit (security scan)"
+    - "PyInstaller build on Windows (smoke if configured)"
+  block_merge_if:
+    - "touches > small_changeset.max_files without label ai-change:refactor/replacement"
+    - "violates placement rules or minimal root convention"
+    - "commenting_policy violations (changelog-style notes in code)"
+    - "performance_guard exceeded without explicit justification + benchmark results"
+
+session_start:
+  instruction: >
+    Read the Gangware Engineering Blueprint first. Treat it as authoritative.
+    Propose small, focused changesets with a one-sentence intent and preview
+    before applying. Include or update tests when behavior changes. Respect
+    placement rules, Windows constraints, commenting standards, and performance
+    budgets. When a small changeset cannot responsibly solve the problem, apply
+    industry judgment to request a guided refactor or a replacement with ADR and
+    feature flagging.

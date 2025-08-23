@@ -29,7 +29,7 @@ from gangware.controllers.vision import VisionController
 from gangware.controllers.controls import InputController
 from gangware.core.logging_setup import setup_logging
 from gangware.core.health import start_health_monitor
-from gangware.features.auto_sim import AutoSimRunner
+
 
 
 def main() -> None:
@@ -101,14 +101,6 @@ def main() -> None:
     overlay.on_start(lambda: hotkey_manager.allow_calibration_start())
     hotkey_manager.start()
 
-    # Auto Sim runner
-    auto_sim = AutoSimRunner(config_manager, vision_controller, input_controller, overlay=overlay)
-    overlay.on_sim_start(lambda code: auto_sim.start(code))
-    overlay.on_sim_stop(lambda: auto_sim.stop(join=True))
-    # SIM calibration controls routed to hotkey manager (F7-driven)
-    overlay.on_sim_cal_start(lambda: hotkey_manager.start_sim_calibration())
-    overlay.on_sim_cal_cancel(lambda: hotkey_manager.cancel_sim_calibration())
-
     # Start worker thread (pass overlay for status updates)
     worker = Worker(
         config_manager,
@@ -124,7 +116,9 @@ def main() -> None:
     try:
         hm_enabled = config_manager.get("health_monitor", fallback="True")
         if str(hm_enabled).strip().lower() in ("true", "1", "yes", "on"):
-            interval = float(config_manager.get("health_interval_seconds", fallback="5"))
+            # Ensure a non-None, clean string before converting to float (satisfies Pylance typing)
+            interval_str: str = config_manager.get("health_interval_seconds", fallback="5") or "5"
+            interval = float(interval_str.strip())
             start_health_monitor(
                 config_manager,
                 session_dir,

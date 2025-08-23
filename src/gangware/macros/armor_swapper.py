@@ -24,6 +24,16 @@ def execute(vision_controller, input_controller, armor_set_name):
     # Step 1: Find and open inventory (template path is a placeholder)
     inventory_btn = vision_controller.find_template('assets/inventory_button.png')
     if inventory_btn:
+        # Get actual confidence achieved from vision controller
+        try:
+            debug_info = vision_controller.get_last_debug()
+            actual_conf = debug_info.get("best_score", None)
+            if actual_conf is not None:
+                print(f"Inventory button found at {inventory_btn} with confidence {actual_conf:.3f}")
+            else:
+                print(f"Inventory button found at {inventory_btn}")
+        except Exception:
+            print(f"Inventory button found at {inventory_btn}")
         input_controller.move_mouse(*inventory_btn)
         input_controller.click()
     else:
@@ -41,6 +51,16 @@ def execute(vision_controller, input_controller, armor_set_name):
     for template_path in armor_templates:
         coords = vision_controller.find_template(template_path)
         if coords:
+            # Get actual confidence achieved from vision controller
+            try:
+                debug_info = vision_controller.get_last_debug()
+                actual_conf = debug_info.get("best_score", None)
+                if actual_conf is not None:
+                    print(f"Armor piece found: {template_path} at {coords} with confidence {actual_conf:.3f}")
+                else:
+                    print(f"Armor piece found: {template_path} at {coords}")
+            except Exception:
+                print(f"Armor piece found: {template_path} at {coords}")
             input_controller.move_mouse(*coords)
             input_controller.click()
         else:
@@ -49,6 +69,16 @@ def execute(vision_controller, input_controller, armor_set_name):
     # Step 3: Close inventory (template path is a placeholder)
     close_btn = vision_controller.find_template('assets/close_button.png')
     if close_btn:
+        # Get actual confidence achieved from vision controller
+        try:
+            debug_info = vision_controller.get_last_debug()
+            actual_conf = debug_info.get("best_score", None)
+            if actual_conf is not None:
+                print(f"Close button found at {close_btn} with confidence {actual_conf:.3f}")
+            else:
+                print(f"Close button found at {close_btn}")
+        except Exception:
+            print(f"Close button found at {close_btn}")
         input_controller.move_mouse(*close_btn)
         input_controller.click()
     else:

@@ -17,6 +17,15 @@ dependencies = [
     "pytest",
 ]
 
+[project.optional-dependencies]
+dev = [
+    "mypy>=1.0.0",
+    "types-requests",
+    "black",
+    "flake8",
+    "pytest-cov",
+]
+
 [project.scripts]
 gangware = "gangware.main:main"
 
@@ -30,3 +39,50 @@ target-version = ["py311"]
 [tool.isort]
 profile = "black"
 line_length = 120
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+extend-exclude = [
+  ".git",
+  "__pycache__",
+  ".venv",
+  "venv",
+  "build",
+  "dist",
+  ".mypy_cache",
+  ".pytest_cache",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "W"]
+ignore = ["E203", "W503", "W504"]
+
+[tool.mypy]
+python_version = "3.13"
+warn_unused_ignores = true
+warn_redundant_casts = true
+check_untyped_defs = true
+show_error_codes = true
+
+[[tool.mypy.overrides]]
+module = [
+    "mss.*",
+    "cv2.*",
+    "numpy.*",
+    "PyQt6.*",
+    "pydirectinput.*",
+    "pyperclip.*",
+    "pytesseract.*",
+    "PIL.*",
+    "pytest.*"
+]
+ignore_missing_imports = true
+warn_unreachable = true
+disallow_untyped_defs = false
+ignore_missing_imports = true
+no_implicit_optional = true
+strict_equality = true
+
+[tool.pytest.ini_options]
+addopts = "-ra -q --maxfail=1 --disable-warnings"

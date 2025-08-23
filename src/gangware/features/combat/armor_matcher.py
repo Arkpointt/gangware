@@ -85,7 +85,7 @@ def _median_hue_bgr(bgr: np.ndarray, sat_min: int = 60, val_min: int = 60) -> Op
         vals = H[mask]
         if vals.size < 25:
             return None
-        return float(np.median(vals))
+        return float(np.median(vals.astype(np.float64)))
     except Exception:
         return None
 
@@ -202,7 +202,7 @@ class ArmorMatcher:
                         continue
                     cur = per_tier.get(tier, (-1.0, (0, 0), (tw, th)))
                     if sc > cur[0]:
-                        per_tier[tier] = (float(sc), loc, (tw, th))
+                        per_tier[tier] = (float(sc), (int(loc[0]), int(loc[1])), (tw, th))
                     if sc > best_overall:
                         best_overall = float(sc)
 
@@ -248,7 +248,7 @@ class ArmorMatcher:
                             continue
                         cur = per_tier.get(tier, (-1.0, (0, 0), (tw, th)))
                         if sc > cur[0]:
-                            per_tier[tier] = (float(sc), loc, (tw, th))
+                            per_tier[tier] = (float(sc), (int(loc[0]), int(loc[1])), (tw, th))
                         if sc > best_overall:
                             best_overall = float(sc)
 
@@ -282,7 +282,8 @@ class ArmorMatcher:
 
     def get_last_best(self, name_norm: str) -> Optional[float]:
         try:
-            return float(self._last_best.get(str(name_norm).strip().lower()))
+            value = self._last_best.get(str(name_norm).strip().lower())
+            return float(value) if value is not None else None
         except Exception:
             return None
 

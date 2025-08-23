@@ -1,11 +1,8 @@
 {
   "include": ["src"],
+  "exclude": ["**/__pycache__", "**/.*"],
   "venvPath": ".",
   "venv": ".venv",
-  "executionEnvironments": [
-    {
-      "root": "src",
-      "extraPaths": ["src"]
-    }
-  ]
+  "typeCheckingMode": "basic",
+  "extraPaths": ["src"]
 }

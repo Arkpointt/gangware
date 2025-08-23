@@ -3,6 +3,7 @@
 Submodules:
 - preprocess: stateless image preprocessing utilities
 - matcher: multi-scale, multi-variant template matching
+- controller: vision orchestration and screen capture
 """
 from .preprocess import (
     edges,
@@ -14,6 +15,7 @@ from .preprocess import (
     create_server_button_mask,
 )
 from .matcher import best_match_multi, match_methods
+from .controller import VisionController
 
 __all__ = [
     "edges",
@@ -25,4 +27,5 @@ __all__ = [
     "create_server_button_mask",
     "best_match_multi",
     "match_methods",
+    "VisionController",
 ]

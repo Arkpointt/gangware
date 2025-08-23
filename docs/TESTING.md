@@ -24,7 +24,8 @@ python -m pytest tests/ -v
 pytest tests/test_smoke.py -q
 
 # Filter by keyword
-pytest -k "auto_sim and not slow" -q
+# Filter by keyword
+pytest -k "debug and not slow" -q
 
 # Re-run last failures fast
 pytest --last-failed -q
@@ -34,6 +35,24 @@ pytest -x -q
 
 # Show slowest tests
 pytest --durations=10 -q
+
+# Test specific packages after refactoring
+pytest src/gangware/features/debug/ -v
+pytest src/gangware/features/combat/ -v
+pytest src/gangware/io/ -v
+pytest src/gangware/vision/ -v
+```
+
+**Package Structure Testing:**
+After the Package-by-Feature refactoring, verify imports work correctly:
+```python
+# Test feature package imports
+from gangware.features.debug import CalibrationService
+from gangware.features.combat import ArmorMatcher, SearchService
+
+# Test supporting package imports
+from gangware.io import InputController
+from gangware.vision import VisionController
 ```
 
 GUI/Windows specifics

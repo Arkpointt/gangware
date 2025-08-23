@@ -6,7 +6,7 @@ This implementation adds enhanced `click_server` and `click_server2` detection t
 ## Key Features Implemented
 
 ### 1. **Enhanced Detection Function** (`find_server_template_enhanced`)
-- **Location**: `src/gangware/controllers/vision.py`
+- **Location**: `src/gangware/vision/controller.py` (moved from controllers)
 - **Purpose**: Specialized detection for server button templates with improved reliability
 - **Key Improvements**:
   - Multiscale search from 0.8x to 1.2x in 0.05 steps (9 scales total)
@@ -23,8 +23,8 @@ This implementation adds enhanced `click_server` and `click_server2` detection t
   - `GW_SERVER_MASK_TOP` (default: 0.3)
   - `GW_SERVER_MASK_BOTTOM` (default: 0.7)
 
-### 3. **Auto Sim Integration**
-- **Location**: `src/gangware/features/auto_sim/` (package export via `__init__.py`)
+### 3. **Debug Integration**
+- **Location**: `src/gangware/features/debug/` (package export via `__init__.py`)
 - **Changes**: Updated server detection logic to use enhanced method
 - **Fallback**: If enhanced detection fails, falls back to standard detection
 - **Verification**: Two-pass verification with ROI-based re-checking
@@ -148,6 +148,6 @@ Potential improvements that could be added:
 The implementation has been verified to:
 - ✅ Import successfully
 - ✅ Create proper masks with configurable parameters
-- ✅ Integrate with existing auto_sim detection logic
+- ✅ Integrate with existing debug detection logic
 - ✅ Maintain backward compatibility
 - ✅ Provide comprehensive error handling and logging

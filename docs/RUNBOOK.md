@@ -2,7 +2,17 @@
 
 ## Prerequisites & Setup
 - Windows 10/11
-- Python 3.11+
+- - If ove### Debug
+- Verify templates: assets/debug/ and optionally %APPDATA%/Gangware/templates/
+- If debug can't find elements, try debug calibration (debug tab > Start, then press F7 at required points)
+- Environment overrides supported by TemplateLibrary (e.g., custom template paths) doesn't show, confirm PyQt6 is installed and no other topmost UI obstructs it
+- If clicks miss, verify DPI scaling and run debug calibration / F6 ROI again
+
+### Debug
+- Verify templates: assets/debug/ and optionally %APPDATA%/Gangware/templates/
+- If detection can't find buttons, try Debug Calibration (Debug tab > Start, then press F7 at required points)
+- Environment overrides supported by TemplateLibrary (e.g., custom template paths)
+- Health monitor interval configurable via `health_interval_seconds` (seconds).11+
 - Recommended: run in a virtual environment
 
 Setup steps:
@@ -17,13 +27,30 @@ Setup steps:
 
 ## UI Structure
 - COMBAT: Tek Punch, Medbrew, Med HoT, Armor search/equip (F2/F3/F4)
-- DEBUG: capture keys, F8 template, optional F6 ROI
-- SIM: enter server code (e.g., 2133), F11 start/stop, SIM calibration via F7/F9
+- DEBUG: capture keys, F8 template, optional F6 ROI, debug calibration via F7/F9
 
 ## Debug/Calibration
 - Open Overlay (F1)
-- Debug tab: capture keys, F8 template, optional F6 ROI
-- SIM tab: enter server code, F11 start/stop; SIM calibration: click Start, then F7 to capture points; F9 to finish
+- Debug tab: capture keys, F8 template, optional F6 ROI, debug calibration: click Start, then F7 to capture points; F9 to finish
+
+## Package Structure (For Developers)
+**Feature Packages:**
+- `gangware.features.debug` - Calibration, ROI/template capture
+- `gangware.features.combat` - Armor, search, tek punch, medbrew
+
+**Supporting Packages:**
+- `gangware.io` - Input controls, Windows APIs
+- `gangware.vision` - Image processing, vision controller
+- `gangware.core` - Hotkeys, state, task management
+- `gangware.gui` - Qt overlay interface
+
+**Import Examples:**
+```python
+from gangware.features.combat import ArmorMatcher, SearchService
+from gangware.features.debug import CalibrationService
+from gangware.io import InputController
+from gangware.vision import VisionController
+```
 
 ## Logs & Support
 - Logs: %APPDATA%/Gangware/logs/session-<ts>/

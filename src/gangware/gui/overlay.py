@@ -432,6 +432,10 @@ class OverlayWindow(QMainWindow):
     def set_status_safe(self, text: str) -> None:
         self.signals._set_status_sig.emit(str(text))
 
+    def __call__(self, text: str) -> None:
+        """Callable interface for StatusCallbackProtocol compatibility."""
+        self.set_status_safe(text)
+
     def prompt_key_capture(self, prompt: str) -> None:
         self.set_status(prompt)
 

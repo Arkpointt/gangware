@@ -2,13 +2,25 @@ Gangware Engineering Blueprint
 
 Version: 6.5 (Living Document)
 Status: Authoritative Reference
+Last Updated: August 23, 2025
+
+Changelog
+
+2025-08-23: Package-by-Feature refactoring completed. Eliminated controllers/ directory, moved functionality to appropriate packages. Consolidated calibration into features/debug/, moved search into features/combat/. Removed auto_sim feature and cleaned up duplicate files. Updated all import paths and package exports.
+
+2025-08-22: Removed "patch" terminology and workflows. Adopted changeset model aligned with interactive "review/approve" editing tools. Clarified commenting standards and change scopes.
+
+2025-08-22: (prior) Controller refactor; ROI service; debug helpers; centralized hotkeys; overlay feedback API; Debug tab; F7 debug capture; F9 stop.gineering Blueprint
+
+Version: 6.5 (Living Document)
+Status: Authoritative Reference
 Last Updated: August 22, 2025
 
 Changelog
 
 2025-08-22: Removed “patch” terminology and workflows. Adopted changeset model aligned with interactive “review/approve” editing tools. Clarified commenting standards and change scopes.
 
-2025-08-22: (prior) Controller refactor; ROI service; calibration helpers; centralized hotkeys; overlay feedback API; SIM tab; F11 start/stop; F7 SIM capture; F9 stop.
+2025-08-22: (prior) Controller refactor; ROI service; debug helpers; centralized hotkeys; overlay feedback API; Debug tab; F7 debug capture; F9 stop.
 
 Earlier entries unchanged.
 
@@ -38,11 +50,18 @@ Respect the platform (Windows integrity/focus; no unsafe injection).
 
 Package-by-Feature inside src/gangware/.
 
+**Package-by-Feature Implementation:**
+- Each feature package (`debug/`, `combat/`) contains all related functionality
+- Feature packages export clean APIs via `__init__.py`
+- Cross-feature dependencies minimized through well-defined interfaces
+- Supporting packages (`core/`, `gui/`, `io/`, `vision/`) provide shared utilities
+- Former `controllers/` functionality distributed to appropriate packages
+
 Dependency Injection for services.
 
 Anti-Corruption Layer: Windows/API specifics isolated in io/.
 
-Event flow: Hotkey/overlay → queue → worker → controllers → feature modules.
+Event flow: Hotkey/overlay → queue → worker → feature modules → io/vision utilities.
 
 Decision vs Actuation: intents produced → validated → safe OS input.
 
@@ -61,13 +80,45 @@ gangware/
 4.2 Source Layout
 src/gangware/
 ├─ features/
-│  ├─ auto_sim/          # server join, armor swap
-│  ├─ calibration/       # ROI and template capture
-│  └─ combat/
+│  ├─ debug/             # ROI and template capture, calibration service
+│  │  ├─ calibration_service.py  # Calibration management
+│  │  ├─ keys.py         # Key capture utilities
+│  │  ├─ pixels.py       # Pixel capture utilities
+│  │  └─ template.py     # Template capture utilities
+│  └─ combat/            # Armor equipment, search, tek punch, medbrew
+│     ├─ armor_matcher.py      # Armor detection and matching
+│     ├─ armor_equipment.py    # Armor equipping service
+│     ├─ search_service.py     # Search and inventory automation
+│     ├─ tek_dash.py          # Tek punch functionality
+│     ├─ medbrew_hot.py       # Medbrew automation
+│     ├─ task_factory.py      # Combat task creation
+│     └─ macros/              # Combat macro implementations
 ├─ core/                 # hotkeys, worker, ROI, logging
+│  ├─ hotkey_manager.py       # Global hotkey coordination
+│  ├─ worker.py              # Background task processing
+│  ├─ state.py               # Application state management
+│  ├─ task_management.py     # Task queue operations
+│  ├─ calibration.py         # Low-level calibration management
+│  ├─ config.py              # Configuration management
+│  ├─ health.py              # Health monitoring
+│  ├─ logging_setup.py       # Logging configuration
+│  ├─ system_service.py      # System-level services
+│  ├─ hotkeys/               # Hotkey utilities
+│  ├─ roi/                   # ROI management utilities
+│  └─ win32/                 # Windows-specific core APIs
 ├─ gui/                  # Qt overlay (feedback only)
-├─ io/                   # Windows helpers (Win32)
-└─ vision/               # image processing utilities
+│  ├─ overlay.py             # Main overlay window
+│  ├─ design_tokens.py       # UI design system
+│  ├─ build_theme.py         # Theme building utilities
+│  └─ theme.qss             # Qt stylesheet
+├─ io/                   # Windows helpers (Win32) and input control
+│  ├─ controls.py            # Input automation (moved from controllers)
+│  └─ win.py                 # Windows API helpers
+└─ vision/               # image processing utilities and coordination
+   ├─ controller.py          # Vision orchestration (moved from controllers)
+   ├─ preprocess.py          # Image preprocessing
+   ├─ matcher.py             # Template matching
+   └─ detectors.py           # Vision detection utilities
 
 4.3 Supporting
 assets/                  # bundled, read-only
@@ -182,7 +233,7 @@ Overlay responsiveness < 50 ms.
 
 Fast-path detection < 1.5 s.
 
-Auto-SIM loop ≈ ≤400 ms typical.
+Debug loop ≈ ≤400 ms typical.
 
 Mouse settle ≤ 35 ms.
 
@@ -202,7 +253,7 @@ Multi-monitor: constrain cursor to Ark monitor; hide taskbar on Ark monitor.
 
 14. Asset & Template Governance
 
-Bundled: assets/auto_sim/; Overrides: %APPDATA%/Gangware/templates/auto_sim.
+Bundled: assets/debug/; Overrides: %APPDATA%/Gangware/templates/debug.
 
 Capture: tight crops; recapture after resolution/UI-scale/HDR changes; maintain synonyms for backward compatibility.
 

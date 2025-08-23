@@ -25,8 +25,8 @@ from gangware.core.config import ConfigManager
 from gangware.core.state import StateManager
 from gangware.core.hotkey_manager import HotkeyManager
 from gangware.core.worker import Worker
-from gangware.controllers.vision import VisionController
-from gangware.controllers.controls import InputController
+from gangware.vision.controller import VisionController
+from gangware.io.controls import InputController
 from gangware.core.logging_setup import setup_logging
 from gangware.core.health import start_health_monitor
 

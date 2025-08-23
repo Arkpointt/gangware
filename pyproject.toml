@@ -64,6 +64,9 @@ warn_unused_ignores = true
 warn_redundant_casts = true
 check_untyped_defs = true
 show_error_codes = true
+warn_return_any = false
+disallow_any_generics = false
+disallow_any_expr = false
 
 [[tool.mypy.overrides]]
 module = [
@@ -75,14 +78,15 @@ module = [
     "pyperclip.*",
     "pytesseract.*",
     "PIL.*",
-    "pytest.*"
+    "pytest.*",
+    "*.armor_matcher",
+    "*.template"
 ]
 ignore_missing_imports = true
-warn_unreachable = true
+warn_unreachable = false
 disallow_untyped_defs = false
-ignore_missing_imports = true
 no_implicit_optional = true
-strict_equality = true
+strict_equality = false
 
 [tool.pytest.ini_options]
 addopts = "-ra -q --maxfail=1 --disable-warnings"

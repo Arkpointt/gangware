@@ -39,8 +39,8 @@ def _find_horizontal_lines(binary: np.ndarray, min_len_frac: float = 0.35) -> li
         lines = None
     out: list[Tuple[int, int, int, int]] = []
     if lines is not None:
-        for l in lines.reshape(-1, 4):
-            x1, y1, x2, y2 = map(int, l)
+        for line in lines.reshape(-1, 4):
+            x1, y1, x2, y2 = map(int, line)
             # Keep near-horizontal segments (|dy| small relative to |dx|)
             dx, dy = abs(x2 - x1), abs(y2 - y1)
             if dx < min_len:

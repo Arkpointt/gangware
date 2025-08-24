@@ -81,7 +81,7 @@ python -m gangware.main
 | **F4** | Equip Mixed Set | Searches and equips mixed set from inventory |
 | **Shift+Q** | Medbrew Burst | Quick consumption burst |
 | **Shift+E** | Medbrew HoT Toggle | Background thread toggles healing-over-time |
-| **Shift+R** | Tek Punch (Tek Dash) | Executes Tek punch sequence |
+| **Shift+R** | Tek Punch (Tek Dash) | Executes Tek punch sequence (preserves jetpack if holding Shift) |
 | **F6** | Capture ROI | Manual inventory region capture (two-press corner selection) |
 | **F7** | Recalibrate / SIM Capture | Opens calibration UI; when SIM calibration is active, captures a point |
 | **F9** | Stop SIM Calibration | Ends SIM capture mode and restores overlay |
@@ -221,7 +221,20 @@ $env:GW_VISION_PERF = "1"; python -m gangware.main
 
 ---
 
-## 📜 License
+## � Recent Changes
+
+### August 2025 - Tek Punch Reliability & Jetpack Fix
+- **Fixed jetpack preservation**: Tek punch no longer turns off jetpack when holding Shift
+- **Simplified gate logic**: Removed complex buffering for more reliable tek punch execution
+- **Improved timing**: Consistent 1.2s execution time with 500ms cooldown
+- **Better user experience**: Predictable behavior during rapid key presses
+- **Reduced complexity**: Eliminated ~100 lines of complex timing logic
+
+See `docs/ADRs/ADR-0007-tek-punch-gate-simplification.md` and `docs/ADRs/ADR-0008-jetpack-preservation-fix.md` for technical details.
+
+---
+
+## �📜 License
 
 MIT License - See LICENSE file for details
 

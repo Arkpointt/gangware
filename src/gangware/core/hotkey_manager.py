@@ -76,7 +76,7 @@ class HotkeyManager(threading.Thread):
         self.input_controller = input_controller
         self.overlay = overlay
         # Tek Dash timing constants
-        self._TEK_DASH_EST_DURATION = 0.9  # seconds
+        self._TEK_DASH_EST_DURATION = 0.85  # seconds (optimized timing)
         self._TEK_DASH_INPUT_WINDOW = 0.2  # seconds before expected end
         # Medbrew HOT thread state
         self._hot_thread: Optional[threading.Thread] = None
@@ -88,7 +88,10 @@ class HotkeyManager(threading.Thread):
         # Common messages
         self._MSG_EXIT = "F10 pressed — exiting application"
         self._MSG_CAL_DONE = "Calibration complete"
-        self._MSG_MENU = "Main menu — overlay ready. Use F2/F3/F4 and Shift+Q/E/R in-game. F1 toggles overlay; F7 recalibrates."
+        self._MSG_MENU = (
+            "Main menu — overlay ready. Use F2/F3/F4 and Shift+Q/E/R in-game. "
+            "F1 toggles overlay; F7 recalibrates."
+        )
         # Hotkey handler registry (id -> callable)
         self._hotkey_handlers: Dict[int, Callable[[], None]] = {}
         # Track whether global registration succeeded for F1 and F7 to suppress polling
@@ -122,11 +125,24 @@ class HotkeyManager(threading.Thread):
                 if _roi_str and "GW_VISION_ROI" not in os.environ:
                     logging.getLogger(__name__).info("startup: deferred ROI application until feature start")
 
-            # Prefill ROI status in overlay if available (show absolute if applied)
+            # Prefill ROI status in overlay if available (show absolute if applied, or preview if deferred)
             if _roi_str and self.overlay and hasattr(self.overlay, "set_roi_status"):
                 try:
                     abs_roi = os.environ.get("GW_VISION_ROI", "")
-                    self.overlay.set_roi_status(bool(abs_roi), abs_roi)
+                    if abs_roi:
+                        # ROI is already applied to environment
+                        self.overlay.set_roi_status(True, abs_roi)
+                    else:
+                        # ROI is deferred, convert relative to absolute for preview
+                        try:
+                            monitor_bounds = w32.current_monitor_bounds()
+                            preview_abs_roi = w32.relative_to_absolute_roi(_roi_str, monitor_bounds)
+                            if preview_abs_roi:
+                                self.overlay.set_roi_status(True, f"{preview_abs_roi} (deferred)")
+                            else:
+                                self.overlay.set_roi_status(True, "ROI configured (deferred)")
+                        except Exception:
+                            self.overlay.set_roi_status(True, "ROI configured (deferred)")
                 except Exception:
                     pass
         except Exception:
@@ -144,9 +160,17 @@ class HotkeyManager(threading.Thread):
         try:
             if self.overlay:
                 if hasattr(self.overlay, "on_capture_inventory"):
-                    self.overlay.on_capture_inventory(lambda: self._ui_capture_key("inventory_key", "Press your Inventory key (keyboard or mouse)", is_tek=False))
+                    self.overlay.on_capture_inventory(
+                        lambda: self._ui_capture_key(
+                            "inventory_key", "Press your Inventory key (keyboard or mouse)", is_tek=False
+                        )
+                    )
                 if hasattr(self.overlay, "on_capture_tek"):
-                    self.overlay.on_capture_tek(lambda: self._ui_capture_key("tek_punch_cancel_key", "Press your Tek Punch Cancel key (keyboard or mouse)", is_tek=True))
+                    self.overlay.on_capture_tek(
+                        lambda: self._ui_capture_key(
+                            "tek_punch_cancel_key", "Press your Tek Punch Cancel key (keyboard or mouse)", is_tek=True
+                        )
+                    )
                 if hasattr(self.overlay, "on_capture_template"):
                     self.overlay.on_capture_template(self._ui_capture_template)
                 if hasattr(self.overlay, "on_capture_roi"):
@@ -358,6 +382,72 @@ class HotkeyManager(threading.Thread):
             pass
 
     # --------------------------- Hotkey hook (Windows) ----------------------------
+    def _start_low_level_hook(self) -> None:
+        """Start backup keyboard detection to ensure Shift+R is never missed."""
+        if sys.platform != "win32":
+            return
+
+        logger = logging.getLogger(__name__)
+
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            WH_KEYBOARD_LL = 13
+            WM_KEYDOWN = 0x0100
+            VK_R = 0x52
+            VK_LSHIFT = 0xA0
+            VK_RSHIFT = 0xA1
+
+            # Store hook state
+            self._hook_id = None
+            self._hook_proc = None
+
+            def low_level_keyboard_proc(nCode: int, wParam: wintypes.WPARAM, lParam: wintypes.LPARAM) -> int:
+                try:
+                    if nCode >= 0 and wParam == WM_KEYDOWN:
+                        # Check if R key is being pressed
+                        vk_code = ctypes.cast(lParam, ctypes.POINTER(ctypes.c_int)).contents.value
+                        if vk_code == VK_R:
+                            # Check if either shift key is pressed
+                            left_shift = ctypes.windll.user32.GetAsyncKeyState(VK_LSHIFT) & 0x8000
+                            right_shift = ctypes.windll.user32.GetAsyncKeyState(VK_RSHIFT) & 0x8000
+
+                            if left_shift or right_shift:
+                                # This is a Shift+R - let RegisterHotKey handle it, don't block here
+                                # Only log for debugging if needed
+                                pass
+                except Exception:
+                    pass  # Don't crash the hook on any error
+
+                # Let the key through - call next hook
+                try:
+                    return ctypes.windll.kernel32.CallNextHookExW(self._hook_id, nCode, wParam, lParam)
+                except Exception:
+                    return 0
+
+            # Set up the hook
+            HOOKPROC = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM)
+            self._hook_proc = HOOKPROC(low_level_keyboard_proc)
+
+            self._hook_id = ctypes.windll.user32.SetWindowsHookExW(
+                WH_KEYBOARD_LL,
+                self._hook_proc,
+                ctypes.windll.kernel32.GetModuleHandleW(None),
+                0
+            )
+
+            if self._hook_id:
+                logger.info("Backup hotkey detection system activated for enhanced reliability")
+                # Don't block - let hook run asynchronously
+            else:
+                logger.warning("Backup hotkey detection could not start - primary system still functional")
+
+        except Exception as e:
+            logger.error(f"Backup hotkey detection failed to start: {e}")
+            import traceback
+            logger.debug(f"Technical details: {traceback.format_exc()}")
+
     def _start_hotkey_hook(self) -> None:
         """Start a Windows message loop thread to catch global hotkeys via RegisterHotKey."""
         if sys.platform != "win32":
@@ -365,6 +455,9 @@ class HotkeyManager(threading.Thread):
         try:
             t = threading.Thread(target=self._hotkey_msg_loop, daemon=True)
             t.start()
+            # Also start low-level keyboard hook as backup for Shift+R
+            hook_t = threading.Thread(target=self._start_low_level_hook, daemon=True)
+            hook_t.start()
         except Exception:
             pass
 
@@ -400,19 +493,21 @@ class HotkeyManager(threading.Thread):
         HK_S_E = 8
         HK_S_R = 9
         HK_F6 = 10
-        HK_F9 = 11
-        HK_F11 = 12
+        HK_F8 = 11
+        HK_F9 = 12
+        HK_F11 = 13
 
         # Modifiers / VKs
         MOD_NONE = 0x0000
         MOD_SHIFT = 0x0004
         VK_F1, VK_F2, VK_F3, VK_F4 = 0x70, 0x71, 0x72, 0x73
-        VK_F6, VK_F7, VK_F9, VK_F10 = 0x75, 0x76, 0x78, 0x79
+        VK_F6, VK_F7, VK_F8, VK_F9, VK_F10 = 0x75, 0x76, 0x77, 0x78, 0x79
         VK_F11 = 0x7A
         VK_Q, VK_E, VK_R = 0x51, 0x45, 0x52
 
         # Register global hotkeys via helper
         self._has_reg_f7 = self._reg_hotkey(HK_F7, MOD_NONE, VK_F7, "F7")
+        self._reg_hotkey(HK_F8, MOD_NONE, VK_F8, "F8")
         self._reg_hotkey(HK_F9, MOD_NONE, VK_F9, "F9")
         self._reg_hotkey(HK_F10, MOD_NONE, VK_F10, "F10")
         self._has_reg_f1 = self._reg_hotkey(HK_F1, MOD_NONE, VK_F1, "F1")
@@ -434,10 +529,11 @@ class HotkeyManager(threading.Thread):
 
         # Map IDs to handlers
         self._hotkey_handlers = self._build_hotkey_handlers(
-            HK_F1, HK_F7, HK_F9, HK_F10, HK_F2, HK_F3, HK_F4, HK_S_Q, HK_S_E, HK_S_R, HK_F6, HK_F11
+            HK_F1, HK_F7, HK_F8, HK_F9, HK_F10, HK_F2, HK_F3, HK_F4, HK_S_Q, HK_S_E, HK_S_R, HK_F6, HK_F11
         )
 
     def _reg_hotkey(self, id_: int, mod: int, vk: int, name: str) -> bool:
+        logger = logging.getLogger(__name__)
         try:
             ok = bool(user32.RegisterHotKey(None, id_, mod, vk))
             if not ok:
@@ -446,6 +542,10 @@ class HotkeyManager(threading.Thread):
                     self._log(f"Failed to register hotkey {name} (id={id_}, err={err})")
                 except Exception:
                     self._log(f"Failed to register hotkey {name} (id={id_})")
+            else:
+                # Log successful registration, especially for Shift+R
+                if name == "Shift+R":
+                    logger.info(f"Successfully registered {name} hotkey (id={id_}) - should intercept all Shift+R")
             return ok
         except Exception:
             self._log(f"Exception while registering hotkey {name} (id={id_})")
@@ -455,6 +555,7 @@ class HotkeyManager(threading.Thread):
         self,
         hk_f1: int,
         hk_f7: int,
+        hk_f8: int,
         hk_f9: int,
         hk_f10: int,
         hk_f2: int,
@@ -469,6 +570,7 @@ class HotkeyManager(threading.Thread):
         return {
             hk_f1: self._on_hotkey_f1,
             hk_f7: self._on_hotkey_f7,
+            hk_f8: self._on_hotkey_f8,
             hk_f9: self._on_hotkey_f9,
             hk_f10: self._maybe_exit_on_f10,
             hk_f2: lambda: self._handle_macro_hotkey(self._task_equip_flak_fullset(), "F2"),
@@ -490,6 +592,32 @@ class HotkeyManager(threading.Thread):
             self._recalibrate_event.set()
         except Exception:
             pass
+
+    def _on_hotkey_f8(self) -> None:
+        """F8 hotkey handler - capture search bar template."""
+        try:
+            if self.overlay:
+                self.overlay.set_status("F8: Position cursor over search bar, then press Enter to capture template.")
+
+            # Import the template capture function
+            from ..features.debug.template import wait_and_capture_template
+
+            # Capture template at cursor location
+            tmpl_path = wait_and_capture_template(self.config_manager, self.overlay)
+
+            if tmpl_path:
+                # Save template path to config
+                self.config_manager.config["DEFAULT"]["search_bar_template"] = str(tmpl_path)
+                self.config_manager.save()
+
+                if self.overlay:
+                    self.overlay.set_status(f"F8: Search bar template captured and saved: {tmpl_path.name}")
+            else:
+                if self.overlay:
+                    self.overlay.set_status("F8: Template capture cancelled or failed.")
+        except Exception as e:
+            if self.overlay:
+                self.overlay.set_status(f"F8: Error capturing template: {e}")
 
     def _on_hotkey_f11(self) -> None:
         """F11 hotkey handler - currently disabled."""
@@ -583,11 +711,13 @@ class HotkeyManager(threading.Thread):
             try:
                 if snapshot_path_str:
                     self.overlay.set_status(
-                        f"ROI set to {width}x{height} at ({left},{top}) [Relative: {rel_roi_str[:20]}...]. Saved snapshot: {snapshot_path_str}. F6 twice to change."
+                        f"ROI set to {width}x{height} at ({left},{top}) [Relative: {rel_roi_str[:20]}...]. "
+                        f"Saved snapshot: {snapshot_path_str}. F6 twice to change."
                     )
                 else:
                     self.overlay.set_status(
-                        f"ROI set to {width}x{height} at ({left},{top}) [Relative]. (Snapshot save failed.) F6 twice to change."
+                        f"ROI set to {width}x{height} at ({left},{top}) [Relative]. "
+                        f"(Snapshot save failed.) F6 twice to change."
                     )
                 if hasattr(self.overlay, "set_roi_status"):
                     # Show absolute coordinates in overlay for user reference
@@ -662,7 +792,11 @@ class HotkeyManager(threading.Thread):
             kernel32.CloseHandle(hproc)
 
     # --------------------------- In-game macro handling ----------------------------
-    def _handle_macro_hotkey(self, task_callable: Callable[[object, object], None], hotkey_label: Optional[str]) -> None:
+    def _handle_macro_hotkey(
+        self,
+        task_callable: Callable[[object, object], None],
+        hotkey_label: Optional[str]
+    ) -> None:
         if not self._is_ark_active():
             # Silently ignore when Ark isn't the foreground window (no toast)
             return
@@ -744,16 +878,56 @@ class HotkeyManager(threading.Thread):
             pass
 
     def _on_hotkey_shift_r(self) -> None:
-        """Tek Dash input window buffering: only buffer within last 200ms of current run."""
+        """Simple tek punch gate: block all presses while running + 500ms cooldown after completion.
+
+        No queueing, no buffering - just a clean gate to prevent spam.
+        """
+        logger = logging.getLogger(__name__)
+
         if not self._is_ark_active():
+            logger.info("Tek punch ignored - ARK not in foreground. Switch to ARK window and try again.")
             return
 
-        self._record_tek_dash_press_timestamp()
-        busy = self._get_tek_dash_busy_state()
-        pending = self._is_task_pending(lambda t: self._is_tek_punch_task(t))
+        try:
+            self._record_tek_dash_press_timestamp()
+        except Exception as e:
+            logger.error(f"Failed to record tek punch timing: {e}")
 
-        if not busy and not pending:
-            self._start_new_tek_dash()
+        try:
+            busy = self.state_manager.get('tek_dash_busy', False)
+        except Exception as e:
+            logger.error(f"Failed to check tek punch status: {e}")
+            busy = False
+
+        try:
+            pending = self._is_task_pending(lambda t: self._is_tek_punch_task(t))
+        except Exception as e:
+            logger.error(f"Failed to check pending tasks: {e}")
+            pending = False
+
+        # Block if busy or pending
+        if busy or pending:
+            logger.debug("Tek punch request ignored - previous tek punch still executing")
+            return
+
+        # 350ms cooldown after completion (reduced for faster rotation)
+        try:
+            import time as _t
+            last_done = float(self.state_manager.get('tek_dash_last_done_at', 0.0) or 0.0)
+        except Exception:
+            last_done = 0.0
+
+        if last_done > 0.0:
+            now_ts = _t.perf_counter()
+            cooldown_ms = 350.0  # Reduced from 500ms for faster rotation
+            if (now_ts - last_done) * 1000.0 < cooldown_ms:
+                time_left = cooldown_ms - ((now_ts - last_done) * 1000.0)
+                logger.debug(f"Tek punch on cooldown for {time_left:.0f}ms more")
+                return
+
+        # Start tek punch - only path to execution
+        logger.info("Tek punch activated - executing sequence (preserves jetpack)")
+        self._start_new_tek_dash()
 
     def _record_tek_dash_press_timestamp(self) -> None:
         """Record the timestamp of the tek dash key press for input window evaluation."""
@@ -762,13 +936,6 @@ class HotkeyManager(threading.Thread):
             self.state_manager.set('tek_dash_last_press_at', _t.perf_counter())
         except Exception:
             pass
-
-    def _get_tek_dash_busy_state(self) -> bool:
-        """Get the current busy state of tek dash, defaulting to False on error."""
-        try:
-            return bool(self.state_manager.get('tek_dash_busy', False))
-        except Exception:
-            return False
 
     def _start_new_tek_dash(self) -> None:
         """Initialize state and queue a new tek dash task."""
@@ -1030,21 +1197,27 @@ class HotkeyManager(threading.Thread):
         return search_service.create_search_and_type_task(text)
 
     def _task_equip_flak_fullset(self) -> Callable[[object, object], None]:
-        """Create task for equipping complete Flak armor set (F2 hotkey)."""
+        """Create task for equipping complete Flak armor set (F3 hotkey)."""
         from ..features.combat.armor_equipment import ArmorEquipmentService
-        armor_service = ArmorEquipmentService(self.config_manager, self.input_controller)
+        from ..features.combat.search_service import SearchService
+        search_service = SearchService(self.config_manager, self.overlay)
+        armor_service = ArmorEquipmentService(self.config_manager, self.input_controller, search_service)
         return armor_service.create_flak_fullset_task()
 
     def _task_equip_tek_fullset(self) -> Callable[[object, object], None]:
-        """Create task for equipping complete Tek armor set (F3 hotkey)."""
+        """Create task for equipping complete Tek armor set (F4 hotkey)."""
         from ..features.combat.armor_equipment import ArmorEquipmentService
-        armor_service = ArmorEquipmentService(self.config_manager, self.input_controller)
+        from ..features.combat.search_service import SearchService
+        search_service = SearchService(self.config_manager, self.overlay)
+        armor_service = ArmorEquipmentService(self.config_manager, self.input_controller, search_service)
         return armor_service.create_tek_fullset_task()
 
     def _task_equip_mixed_fullset(self) -> Callable[[object, object], None]:
-        """Create task for equipping mixed armor set configuration (F4 hotkey)."""
+        """Create task for equipping mixed armor set configuration (F5 hotkey)."""
         from ..features.combat.armor_equipment import ArmorEquipmentService
-        armor_service = ArmorEquipmentService(self.config_manager, self.input_controller)
+        from ..features.combat.search_service import SearchService
+        search_service = SearchService(self.config_manager, self.overlay)
+        armor_service = ArmorEquipmentService(self.config_manager, self.input_controller, search_service)
         return armor_service.create_mixed_fullset_task()
 
     def _complete_and_exit_calibration(self) -> None:

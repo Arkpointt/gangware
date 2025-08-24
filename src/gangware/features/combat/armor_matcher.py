@@ -74,6 +74,7 @@ class _Tpl:
     edges: np.ndarray
     size: Tuple[int, int]  # (w, h)
     path: str
+    crop_offset: Tuple[int, int] = (0, 0)  # (x_offset, y_offset) from original template
 
 
 def _median_hue_bgr(bgr: np.ndarray, sat_min: int = 60, val_min: int = 60) -> Optional[float]:
@@ -129,7 +130,7 @@ class ArmorMatcher:
         self,
         roi_bgr: np.ndarray,
         name_norm: str,
-        threshold: float = 0.88,
+        threshold: float = 0.25,
         early_exit: bool = True,
     ) -> Optional[Tuple[int, int, float, str, int, int]]:
         """
@@ -147,12 +148,18 @@ class ArmorMatcher:
         self._ensure_loaded(name_norm)
         if name_norm not in self._bank:
             return None
-        # Prepare ROI edges once for speed
+        # Prepare ROI edges variants once for robustness (HDR/illumination)
         try:
             gray = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2GRAY)
         except Exception:
             return None
         edges_roi = cv2.Canny(gray, 60, 120)
+        try:
+            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+            gray_cla = clahe.apply(gray)
+            edges_roi_cla = cv2.Canny(gray_cla, 50, 140)
+        except Exception:
+            edges_roi_cla = edges_roi
 
         # Track best per tier
         per_tier: Dict[str, Tuple[float, Tuple[int, int], Tuple[int, int]]] = {}
@@ -196,8 +203,15 @@ class ArmorMatcher:
                             )
                         if edges_roi.shape[0] < th or edges_roi.shape[1] < tw:
                             continue
-                        res = cv2.matchTemplate(edges_roi, tpl_edges, cv2.TM_CCOEFF_NORMED)
-                        _, sc, _, loc = cv2.minMaxLoc(res)
+                        # Evaluate against both ROI variants and take the better score
+                        res1 = cv2.matchTemplate(edges_roi, tpl_edges, cv2.TM_CCOEFF_NORMED)
+                        res2 = cv2.matchTemplate(edges_roi_cla, tpl_edges, cv2.TM_CCOEFF_NORMED)
+                        _, sc1, _, loc1 = cv2.minMaxLoc(res1)
+                        _, sc2, _, loc2 = cv2.minMaxLoc(res2)
+                        if sc2 > sc1:
+                            sc, loc = sc2, loc2
+                        else:
+                            sc, loc = sc1, loc1
                     except Exception:
                         continue
                     cur = per_tier.get(tier, (-1.0, (0, 0), (tw, th)))
@@ -212,8 +226,10 @@ class ArmorMatcher:
                         predicted = self._classify_by_hue(name_norm, tile)
                         if predicted == tier:
                             t_end = time.perf_counter()
-                            logging.getLogger(__name__).info("armor_matcher: FAST_EXIT score=%.3f attempts=%d time=%.1fms",
-                                                             sc, fast_attempts, (t_end-t_start)*1000)
+                            logging.getLogger(__name__).info(
+                                "armor_matcher: FAST_EXIT score=%.3f attempts=%d time=%.1fms",
+                                sc, fast_attempts, (t_end - t_start) * 1000,
+                            )
                             try:
                                 self._last_best[name_norm] = float(sc)
                             except Exception:
@@ -242,8 +258,15 @@ class ArmorMatcher:
                             )
                             if edges_roi.shape[0] < th or edges_roi.shape[1] < tw:
                                 continue
-                            res = cv2.matchTemplate(edges_roi, tpl_edges, cv2.TM_CCOEFF_NORMED)
-                            _, sc, _, loc = cv2.minMaxLoc(res)
+                            # Evaluate against both ROI variants and take the better score
+                            res1 = cv2.matchTemplate(edges_roi, tpl_edges, cv2.TM_CCOEFF_NORMED)
+                            res2 = cv2.matchTemplate(edges_roi_cla, tpl_edges, cv2.TM_CCOEFF_NORMED)
+                            _, sc1, _, loc1 = cv2.minMaxLoc(res1)
+                            _, sc2, _, loc2 = cv2.minMaxLoc(res2)
+                            if sc2 > sc1:
+                                sc, loc = sc2, loc2
+                            else:
+                                sc, loc = sc1, loc1
                         except Exception:
                             continue
                         cur = per_tier.get(tier, (-1.0, (0, 0), (tw, th)))
@@ -253,9 +276,15 @@ class ArmorMatcher:
                             best_overall = float(sc)
 
         t_end = time.perf_counter()
-        logging.getLogger(__name__).info("armor_matcher: timing fast=%d/%d slow=%d fast_time=%.1fms total_time=%.1fms best=%.3f",
-                                         fast_attempts, len(fast_scales)*len(tiers)*sum(len(self._bank[name_norm][t]) for t in tiers),
-                                         slow_attempts, (t_fast-t_start)*1000, (t_end-t_start)*1000, best_overall)
+        logging.getLogger(__name__).info(
+            "armor_matcher: timing fast=%d/%d slow=%d fast_time=%.1fms total_time=%.1fms best=%.3f",
+            fast_attempts,
+            len(fast_scales) * len(tiers) * sum(len(self._bank[name_norm][t]) for t in tiers),
+            slow_attempts,
+            (t_fast - t_start) * 1000,
+            (t_end - t_start) * 1000,
+            best_overall,
+        )
 
         # Choose best across tiers; verify hue if possible
         best_tier: Optional[str] = None
@@ -307,7 +336,9 @@ class ArmorMatcher:
         if not paths:
             logging.getLogger(__name__).info("armor_matcher: no template paths found for %s", name_norm)
             return
-        logging.getLogger(__name__).info("armor_matcher: loading templates for %s: %s", name_norm, [str(p) for p in paths])
+        logging.getLogger(__name__).info(
+            "armor_matcher: loading templates for %s: %s", name_norm, [str(p) for p in paths]
+        )
 
         # Load templates grouped by tier and learn a ref hue per tier
         per_tier: Dict[str, List[_Tpl]] = {}
@@ -328,7 +359,7 @@ class ArmorMatcher:
             # For better matching, extract just the center region where the item icon is,
             # excluding background and text overlays that vary between template and inventory
             h_full, w_full = g.shape[:2]
-            # Use center 60% of image to focus on the actual item icon
+            # Use center 60% of image to focus on the actual item icon (working version approach)
             crop_margin = 0.2
             y_start = int(h_full * crop_margin)
             y_end = int(h_full * (1 - crop_margin))
@@ -337,7 +368,12 @@ class ArmorMatcher:
             g_cropped = g[y_start:y_end, x_start:x_end]
             edges = cv2.Canny(g_cropped, 60, 120)
             h, w = edges.shape[:2]
-            per_tier.setdefault(tier, []).append(_Tpl(tier=tier, edges=edges, size=(w, h), path=str(p)))
+            # Store crop offset for coordinate adjustment
+            crop_offset = (x_start, y_start)
+            per_tier.setdefault(tier, []).append(_Tpl(
+                tier=tier, edges=edges, size=(w, h),
+                path=str(p), crop_offset=crop_offset
+            ))
             logging.getLogger(__name__).info("armor_matcher: loaded %s tier=%s size=%dx%d (cropped from %dx%d)",
                                              p.name, tier, w, h, w_full, h_full)
             if tier not in tier_ref:

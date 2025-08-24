@@ -40,10 +40,13 @@ class ConfigManager:
         """Load configuration from disk, creating defaults when needed."""
         if self.config_path.exists():
             self.config.read(self.config_path)
-            return
 
-        # Defaults when there is no config file yet
-        self.config["DEFAULT"] = {
+        # Ensure DEFAULT section exists (for resolution monitoring and other defaults)
+        if "DEFAULT" not in self.config:
+            self.config["DEFAULT"] = {}
+
+        # Set default values if they don't exist
+        defaults = {
             "log_level": "INFO",
             "dry_run": "False",
             "resolution": "1920x1080",
@@ -51,10 +54,21 @@ class ConfigManager:
             "calibration_complete": "False",
             "inventory_key": "",
             "tek_punch_cancel_key": "",
+            # Basic tek punch timing (tek punch works with these simple settings)
+            "tek_punch_pre_rmb_delay_ms": "120",
+            "tek_punch_rmb_hold_ms": "800",  # Working value from logs
+            "tek_punch_post_rmb_settle_ms": "180",
             "search_bar_template": "",
             "ui_demo": "False",
         }
-        self.save()
+
+        for key, value in defaults.items():
+            if key not in self.config["DEFAULT"]:
+                self.config["DEFAULT"][key] = value
+
+        # Save if we added any defaults to existing config
+        if self.config_path.exists() and any(key not in self.config["DEFAULT"] for key in defaults):
+            self.save()
 
     def get(self, key: str, fallback=None):
         """Get a configuration value with precedence: env > config.ini > fallback.

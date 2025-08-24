@@ -1,5 +1,3 @@
-from pathlib import Path
-
 from src.gangware.gui import build_theme
 from src.gangware.gui import design_tokens as T
 

@@ -100,7 +100,8 @@ class Worker(threading.Thread):
                 import time as _t
                 self.state_manager.set('tek_dash_started_at', _t.perf_counter())
                 # Keep in sync with manager's estimate if needed
-                self.state_manager.set('tek_dash_est_duration', 0.9)
+                self.state_manager.set('tek_dash_est_duration', 0.85)
+                logging.getLogger(__name__).info("Tek punch sequence executing - inputs sent to ARK")
             except Exception:
                 pass
 
@@ -108,34 +109,49 @@ class Worker(threading.Thread):
         # Handle buffering only for Tek Dash tasks
         if not is_tek_dash:
             return
-        try:
-            # Mark not busy now that the execution finished
-            self.state_manager.set('tek_dash_busy', False)
-        except Exception:
-            pass
-        # Check buffered flag and enqueue one more if present
+        # Check buffered flag (while still considered busy) and enqueue one more if present
         try:
             buffered = bool(self.state_manager.get('tek_dash_buffer', False))
         except Exception:
             buffered = False
-        if not buffered:
-            return
-        try:
-            # Consume buffer and mark busy, then enqueue one more
-            self.state_manager.set('tek_dash_buffer', False)
-            self.state_manager.set('tek_dash_busy', True)
-        except Exception:
-            pass
-        try:
-            self.task_queue.put_nowait(self._make_tek_punch_task())
-            if (self.status_callback is not None and
-                hasattr(self.status_callback, 'flash_hotkey_line')):
+        if buffered:
+            try:
+                # Consume buffer and keep busy=True, then enqueue one more
+                self.state_manager.set('tek_dash_buffer', False)
+                self.state_manager.set('tek_dash_busy', True)
+                logging.getLogger(__name__).info("Multiple tek punch requests detected - executing queued sequence")
+            except Exception:
+                pass
+            # Small delay before playing the buffered repeat (reduced for speed)
+            try:
+                delay_ms = float(self.state_manager.get('tek_dash_buffer_delay_ms', 150.0))
+            except Exception:
+                delay_ms = 150.0
+            try:
+                if delay_ms > 0:
+                    logging.getLogger(__name__).info("Brief pause before next tek punch sequence (%.0fms)", delay_ms)
+                    time.sleep(min(delay_ms / 1000.0, 0.5))
+                self.task_queue.put_nowait(self._make_tek_punch_task())
+                if (self.status_callback is not None and
+                    hasattr(self.status_callback, 'flash_hotkey_line')):
+                    try:
+                        self.status_callback.flash_hotkey_line("Shift+R")
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+        else:
+            # No buffer requested: mark not busy now that the execution finished
+            try:
+                self.state_manager.set('tek_dash_busy', False)
                 try:
-                    self.status_callback.flash_hotkey_line("Shift+R")
+                    import time as _t
+                    self.state_manager.set('tek_dash_last_done_at', _t.perf_counter())
                 except Exception:
                     pass
-        except Exception:
-            pass
+                logging.getLogger(__name__).info("Tek punch sequence completed successfully")
+            except Exception:
+                pass
 
     def _make_tek_punch_task(self):
         # Helper to produce a tagged Tek Punch callable similar to HotkeyManager

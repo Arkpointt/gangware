@@ -13,7 +13,7 @@ Detectors themselves remain pure functions in gangware.vision.* modules.
 """
 from __future__ import annotations
 
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict, Any, List
 from pathlib import Path
 import logging
 import os
@@ -36,9 +36,6 @@ from ..config.vision import (
     ARTIFACT_MAX_DIM,
 )
 from ..vision import (
-    edges,
-    make_tile_mask,
-    apply_mask,
     resize_tpl,
     create_server_button_mask,
     best_match_multi,
@@ -63,9 +60,9 @@ class VisionController:
 
     def __init__(self) -> None:
         self._tls = threading.local()
-        self._last_debug = {}
+        self._last_debug: Dict[str, Any] = {}
         self._last_pos: Optional[Tuple[int, int]] = None
-        self._last_perf = {}
+        self._last_perf: Dict[str, Any] = {}
         self.search_roi: Optional[dict] = None
         self.ui_scale: float = 1.0
         self.ui_scale_ts: float = 0.0  # timestamp when scale was last set
@@ -142,9 +139,9 @@ class VisionController:
             sub_env = os.environ.get("GW_INV_SUBROI", "").strip()
             if sub_env and self.search_roi is None:  # don't override explicit manual ROI
                 try:
-                    parts = [float(p.strip()) for p in sub_env.split(",")]
-                    if len(parts) == 4:
-                        rl, rt, rw, rh = [max(0.0, min(1.0, v)) for v in parts]
+                    sub_parts: List[float] = [float(p.strip()) for p in sub_env.split(",")]
+                    if len(sub_parts) == 4:
+                        rl, rt, rw, rh = [max(0.0, min(1.0, float(v))) for v in sub_parts]
                         L = int(roi_override.get("left", 0))
                         T = int(roi_override.get("top", 0))
                         W = int(roi_override.get("width", 0))
@@ -321,7 +318,10 @@ class VisionController:
 
         # Persist debug artifacts on miss: downscaled screenshot and template
         try:
-            art_dir = get_artifacts_dir(type("_Cfg", (), {"config_path": Path.home() / "AppData" / "Roaming" / "Gangware" / "config.ini"})())
+            config_obj = type("_Cfg", (), {
+                "config_path": Path.home() / "AppData" / "Roaming" / "Gangware" / "config.ini"
+            })()
+            art_dir = get_artifacts_dir(config_obj)
             # Save last screenshot of best region
             if best_overall_region is not None:
                 try:
@@ -362,7 +362,10 @@ class VisionController:
                 }
             except Exception:
                 self._last_perf = {"total_ms": (t_call1 - t_call0) * 1000.0, "phase": "miss"}
-        logger.info("vision: no match. best_score=%.3f meta=%s region=%s", float(best_overall), str(best_overall_meta), str(best_overall_region))
+        logger.info(
+            "vision: no match. best_score=%.3f meta=%s region=%s",
+            float(best_overall), str(best_overall_meta), str(best_overall_region)
+        )
         return None
 
     def find_server_template_enhanced(self, template_path: str, confidence: float = 0.8) -> Optional[Tuple[int, int]]:
@@ -615,7 +618,12 @@ class VisionController:
         top_abs = int(base_region["top"]) + int(t_rel)
         right_abs = int(base_region["left"]) + int(r_rel)
         bottom_abs = int(base_region["top"]) + int(b_rel)
-        roi = {"left": left_abs, "top": top_abs, "width": max(0, right_abs - left_abs), "height": max(0, bottom_abs - top_abs)}
+        roi = {
+            "left": left_abs,
+            "top": top_abs,
+            "width": max(0, right_abs - left_abs),
+            "height": max(0, bottom_abs - top_abs)
+        }
         try:
             if roi.get("width", 0) <= 0 or roi.get("height", 0) <= 0:
                 return None
@@ -637,7 +645,7 @@ class VisionController:
                 try:
                     parts = [float(p.strip()) for p in sub_env.split(",")]
                     if len(parts) == 4:
-                        rl, rt, rw, rh = [max(0.0, min(1.0, v)) for v in parts]
+                        rl, rt, rw, rh = [max(0.0, min(1.0, float(v))) for v in parts]
                         L = int(roi.get("left", 0))
                         T = int(roi.get("top", 0))
                         W = int(roi.get("width", 0))
@@ -659,34 +667,47 @@ class VisionController:
 
     def match_item_in_inventory(self, roi_bgr: np.ndarray, template_path: str) -> tuple[bool, tuple[int, int], float]:
         """
-        Match a single inventory icon inside roi_bgr using the cached UI scale
-        and a center-masked edges template. Returns (found, (x,y), score) with (x,y)
-        the top-left in ROI coords.
+        Match a single inventory icon inside roi_bgr using a robust multi-variant,
+        small multiscale template match around the cached UI scale. Returns
+        (found, (x,y), score) with (x,y) the top-left in ROI coords.
         """
+        logger = logging.getLogger(__name__)
         tpl = cv2.imread(template_path, cv2.IMREAD_GRAYSCALE)
         if tpl is None:
             raise FileNotFoundError(template_path)
-        # scale template to live UI scale from search-bar calibration
-        s = float(getattr(self, "ui_scale", 1.0) or 1.0)
-        if abs(s - 1.0) > 0.02:
-            th, tw = tpl.shape[:2]
-            tpl = cv2.resize(
-                tpl,
-                (max(8, int(tw * s)), max(8, int(th * s))),
-                interpolation=cv2.INTER_AREA if s < 1.0 else cv2.INTER_CUBIC,
+
+        ui_s = float(getattr(self, "ui_scale", 1.0) or 1.0)
+        try:
+            breadth = float(os.environ.get("GW_ITEM_SCALES_BREADTH", "0.10"))
+        except Exception:
+            breadth = 0.10
+        breadth = max(0.02, min(0.25, breadth))
+        scales = sorted({
+            round(ui_s * (1.0 - breadth), 3),
+            round(ui_s * (1.0 - breadth * 0.5), 3),
+            round(ui_s, 3),
+            round(ui_s * (1.0 + breadth * 0.5), 3),
+            round(ui_s * (1.0 + breadth), 3),
+        })
+
+        try:
+            gray = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2GRAY)
+        except Exception:
+            gray = roi_bgr if roi_bgr.ndim == 2 else roi_bgr[:, :, 0]
+
+        modes = ["edges_center", "edges", "gray_clahe", "grad", "gray_eq", "gray_blur"]
+        score, loc, wh, meta = best_match_multi(gray, tpl, list(scales), modes)
+
+        if PERF_ENABLED or logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "vision: inv match score=%.3f ui_s=%.3f scales=%s meta=%s",
+                float(score), ui_s, scales, meta,
             )
-        # edges + center mask (ignore digits/shield/borders)
-        edges_tpl = edges(tpl)
-        mask = make_tile_mask(edges_tpl.shape)
-        edges_tpl = apply_mask(edges_tpl, mask)
-        gray = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2GRAY)
-        edges_roi = edges(gray)
-        scr = np.ascontiguousarray(edges_roi)
-        tp = np.ascontiguousarray(edges_tpl)
-        # fast, single-scale match
-        res = cv2.matchTemplate(scr, tp, cv2.TM_CCOEFF_NORMED)
-        _, score, _, loc = cv2.minMaxLoc(res)
-        return (float(score) >= float(INVENTORY_ITEM_THRESHOLD)), (int(loc[0]), int(loc[1])), float(score)
+
+        if loc is None or wh is None:
+            return (False, (0, 0), float(score if isinstance(score, (int, float)) else -1.0))
+        x, y = int(loc[0]), int(loc[1])
+        return (float(score) >= float(INVENTORY_ITEM_THRESHOLD)), (x, y), float(score)
 
     def set_search_roi(self, region: Optional[dict]):
         """Set an absolute screen-space ROI dict {left, top, width, height} to restrict searches."""

@@ -3,6 +3,7 @@ Handles all input automation tasks.
 """
 
 import sys
+import time
 import logging
 import pydirectinput
 import os
@@ -105,7 +106,12 @@ class InputController:
         current_x, current_y = self._get_mouse_pos()
         logger.info("mouse: attempting move from (%s,%s) to (%d,%d)", current_x, current_y, xi, yi)
         try:
-            logger.debug("mouse: move cfg duration=%.3f verify=%s tol=%d", float(self._move_duration or 0.0), str(self._skip_verify is False), int(self._verify_tol or 0))
+            logger.debug(
+                "mouse: move cfg duration=%.3f verify=%s tol=%d",
+                float(self._move_duration or 0.0),
+                str(self._skip_verify is False),
+                int(self._verify_tol or 0),
+            )
         except Exception:
             pass
 
@@ -157,7 +163,13 @@ class InputController:
 
         # Debug: Log click attempt
         current_x, current_y = self._get_mouse_pos()
-        logger.info("mouse: attempting click %s button %d times at position (%s,%s)", btn, presses, current_x, current_y)
+        logger.info(
+            "mouse: attempting click %s button %d times at position (%s,%s)",
+            btn,
+            presses,
+            current_x,
+            current_y,
+        )
 
         def _loop(n: int, fn):
             for _ in range(max(1, int(n))):
@@ -256,11 +268,95 @@ class InputController:
 
     def mouse_down(self, button: str = 'left'):
         """Press and hold a mouse button (left/right/middle)."""
-        pydirectinput.mouseDown(button=button)
+        logger = logging.getLogger(__name__)
+        btn = str(button or 'left').lower()
+        # Button-state snapshot (Windows only)
+        before = self._snapshot_mouse_buttons()
+        t0 = time.perf_counter()
+        logger.info("mouse: down request button=%s state_before=%s", btn, before)
+        try:
+            pydirectinput.mouseDown(button=btn)
+        except Exception as e:
+            logger.exception("mouse: mouseDown failed via pydirectinput: %s", e)
+            # Best-effort Win32 fallback on Windows
+            if sys.platform == "win32" and _user32 is not None:
+                try:
+                    flags = 0x0002 if btn == 'left' else (0x0008 if btn == 'right' else 0x0020)
+                    _user32.mouse_event(flags, 0, 0, 0, 0)
+                    logger.info("mouse: mouse_event DOWN fallback used for %s", btn)
+                except Exception:
+                    logger.warning("mouse: mouse_event DOWN fallback failed for %s", btn)
+        # Small settle then sample state
+        self._sleep(0.003)
+        after = self._snapshot_mouse_buttons()
+        dt_ms = (time.perf_counter() - t0) * 1000.0
+        logger.info("mouse: down applied button=%s dt=%.1fms state_after=%s", btn, dt_ms, after)
 
     def mouse_up(self, button: str = 'left'):
         """Release a previously held mouse button (left/right/middle)."""
-        pydirectinput.mouseUp(button=button)
+        logger = logging.getLogger(__name__)
+        btn = str(button or 'left').lower()
+        before = self._snapshot_mouse_buttons()
+        t0 = time.perf_counter()
+        logger.info("mouse: up request button=%s state_before=%s", btn, before)
+        try:
+            pydirectinput.mouseUp(button=btn)
+        except Exception as e:
+            logger.exception("mouse: mouseUp failed via pydirectinput: %s", e)
+            if sys.platform == "win32" and _user32 is not None:
+                try:
+                    flags = 0x0004 if btn == 'left' else (0x0010 if btn == 'right' else 0x0040)
+                    _user32.mouse_event(flags, 0, 0, 0, 0)
+                    logger.info("mouse: mouse_event UP fallback used for %s", btn)
+                except Exception:
+                    logger.warning("mouse: mouse_event UP fallback failed for %s", btn)
+        self._sleep(0.003)
+        after = self._snapshot_mouse_buttons()
+        dt_ms = (time.perf_counter() - t0) * 1000.0
+        logger.info("mouse: up applied button=%s dt=%.1fms state_after=%s", btn, dt_ms, after)
+
+    def _snapshot_mouse_buttons(self) -> dict:
+        """Best-effort snapshot of mouse buttons pressed. Windows only; else returns {}.
+
+        Returns a dict like {"L": True/False, "R": True/False, "M": True/False}.
+        """
+        if sys.platform != "win32" or _user32 is None:
+            return {}
+        try:
+            # GetAsyncKeyState high-bit indicates key is down
+            def down(vk: int) -> bool:
+                try:
+                        u32 = _user32
+                        if u32 is None:
+                            return False
+                        return bool(u32.GetAsyncKeyState(vk) & 0x8000)
+                except Exception:
+                    return False
+            return {
+                "L": down(0x01),  # VK_LBUTTON
+                "R": down(0x02),  # VK_RBUTTON
+                "M": down(0x04),  # VK_MBUTTON
+            }
+        except Exception:
+            return {}
+
+    def is_mouse_down(self, button: str) -> bool:
+        """Return True if the specified mouse button is currently down.
+
+        Supported buttons: 'left', 'right', 'middle'. On non-Windows platforms or
+        when state can't be queried, returns False.
+        """
+        m = self._snapshot_mouse_buttons()
+        b = str(button or '').lower()
+        if not m:
+            return False
+        if b == 'left':
+            return bool(m.get('L'))
+        if b == 'right':
+            return bool(m.get('R'))
+        if b == 'middle':
+            return bool(m.get('M'))
+        return False
 
     def type_text(self, text: str, interval: float = 0.02, pre_delay: float = 0.03):
         """
@@ -382,7 +478,13 @@ class InputController:
         self._sleep(pre_delay)
         try:
             # Inject text as rapid key events (AHK-like SendInput behavior), no Ctrl+V required
-            self.type_text_guarded_fast(str(text), pre_delay=0.0, first_delay=0.035, post_space_delay=0.02, burst_interval=0.0)
+            self.type_text_guarded_fast(
+                str(text),
+                pre_delay=0.0,
+                first_delay=0.035,
+                post_space_delay=0.02,
+                burst_interval=0.0,
+            )
             self._sleep(settle)
             return
         except Exception:
@@ -394,7 +496,14 @@ class InputController:
         except Exception:
             pass
 
-    def type_text_guarded_fast(self, text: str, pre_delay: float = 0.03, first_delay: float = 0.035, post_space_delay: float = 0.02, burst_interval: float = 0.0):
+    def type_text_guarded_fast(
+        self,
+        text: str,
+        pre_delay: float = 0.03,
+        first_delay: float = 0.035,
+        post_space_delay: float = 0.02,
+        burst_interval: float = 0.0,
+    ):
         """
         Fast text injection tuned for games:
         - small pre-delay before first char

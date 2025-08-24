@@ -8,7 +8,7 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import Callable, Optional, Dict, Any, Tuple, TYPE_CHECKING
+from typing import Callable, Optional, Dict, Tuple, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ..combat.armor_matcher import ArmorMatcher
@@ -32,12 +32,15 @@ class SearchService:
         self.config_manager = config_manager
         self.overlay = overlay
         self._armor_matcher = None
+        self._cached_search_coords = None  # Cache search bar coordinates for reuse
 
-    def create_search_and_type_task(self, text: str) -> Callable[[object, object], None]:
+    def create_search_and_type_task(
+        self, text: str, close_inventory: bool = True, open_inventory: bool = True
+    ) -> Callable[[object, object], None]:
         """Create task for searching and typing text in inventory.
 
         This method creates a comprehensive search and type task that:
-        1. Opens inventory using configured hotkey
+        1. Opens inventory using configured hotkey (if requested)
         2. Locates the search bar template
         3. Clicks and clears the search field
         4. Types the specified text
@@ -45,6 +48,8 @@ class SearchService:
 
         Args:
             text: Text to search for and type
+            close_inventory: Whether to close inventory after task completion
+            open_inventory: Whether to open inventory at start (set False for subsequent items)
 
         Returns:
             Callable task function for execution
@@ -56,35 +61,39 @@ class SearchService:
             logger = logging.getLogger(__name__)
 
             try:
-                # 1) Open inventory using configured token (keyboard or mouse)
-                inv_token = self._get_token('inventory_key', 'key_i')
-                t_phase = _t.perf_counter()
+                # 1) Open inventory using configured token (keyboard or mouse) - only if requested
+                if open_inventory:
+                    inv_token = self._get_token('inventory_key', 'key_i')
+                    t_phase = _t.perf_counter()
 
-                try:
-                    if self.overlay:
-                        self.overlay.set_status(f"Opening inventory with {self._token_display(inv_token)}...")
-                    # Use press_token to support mouse buttons like XBUTTON2
-                    if hasattr(input_controller, 'press_token'):
-                        input_controller.press_token(inv_token)
-                    else:
-                        # Fallback: press key token directly if available
-                        name = inv_token.split('_', 1)[1] if '_' in inv_token else inv_token
-                        if inv_token.startswith('key_'):
-                            input_controller.press_key(name)
-                except Exception:
-                    pass
+                    try:
+                        if self.overlay:
+                            self.overlay.set_status(f"Opening inventory with {self._token_display(inv_token)}...")
+                        # Use press_token to support mouse buttons like XBUTTON2
+                        if hasattr(input_controller, 'press_token'):
+                            input_controller.press_token(inv_token)
+                        else:
+                            # Fallback: press key token directly if available
+                            name = inv_token.split('_', 1)[1] if '_' in inv_token else inv_token
+                            if inv_token.startswith('key_'):
+                                input_controller.press_key(name)
+                    except Exception:
+                        pass
 
-                # Give the game UI time to open
-                try:
-                    time.sleep(0.25)
-                except Exception:
-                    pass
+                    # Give the game UI time to open and stabilize
+                    try:
+                        time.sleep(0.5)  # Increased from 0.25 to 0.5 seconds
+                    except Exception:
+                        pass
 
-                try:
-                    logger.info("macro=F2 phase=open_inventory corr=%s duration_ms=%.1f",
-                              corr, (_t.perf_counter() - t_phase) * 1000.0)
-                except Exception:
-                    pass
+                    try:
+                        logger.info("macro=F2 phase=open_inventory corr=%s duration_ms=%.1f",
+                                  corr, (_t.perf_counter() - t_phase) * 1000.0)
+                    except Exception:
+                        pass
+                else:
+                    # Skip inventory opening for subsequent items
+                    logger.info("macro=F2 phase=skip_open_inventory corr=%s (inventory already open)", corr)
 
                 # 2) Locate the saved template path
                 tmpl = self.config_manager.get('search_bar_template')
@@ -96,52 +105,80 @@ class SearchService:
                 # This ROI will be applied later as an inventory sub-region for item matching.
                 _abs_roi_env = os.environ.get('GW_VISION_ROI', '').strip()
 
-                # Retry search with gradually relaxed confidence; re-open inventory if needed
-                coords = None
-                for attempt in range(5):
-                    # Gradually relax confidence from 0.70 down to 0.50
-                    conf = max(0.50, 0.70 - 0.03 * attempt)
+                # Apply deferred ROI from config if not already in environment
+                if not _abs_roi_env:
                     try:
-                        if self.overlay:
-                            self.overlay.set_status(f"Finding search bar… attempt {attempt+1}/8 (conf>={conf:.2f})")
-                    except Exception:
-                        pass
-
-                    try:
-                        coords = self._find_search_bar(vision_controller, tmpl, conf, _abs_roi_env)
+                        rel_roi = self.config_manager.get('vision_roi', '').strip()
+                        if rel_roi and ',' in rel_roi:
+                            # Import the conversion function
+                            from ...core.win32 import utils as w32
+                            monitor_bounds = w32.current_monitor_bounds()
+                            abs_roi = w32.relative_to_absolute_roi(rel_roi, monitor_bounds)
+                            if abs_roi:
+                                os.environ['GW_VISION_ROI'] = abs_roi
+                                _abs_roi_env = abs_roi
+                                logger.info("Applied deferred ROI from config: %s -> %s", rel_roi, abs_roi)
                     except Exception as e:
-                        logger.exception("macro=F2 phase=find_bar corr=%s attempt=%d error=%s",
-                                       corr, attempt + 1, str(e))
-                        coords = None
+                        logger.warning("Failed to apply deferred ROI: %s", e)
 
-                    if coords:
-                        logger.info("macro=F2 phase=find_bar corr=%s attempt=%d result=match coords=%s conf>=%.2f",
-                                  corr, attempt + 1, str(coords), conf)
-                        self._log_monitor_detection(coords)
-                        break
-
-                    # On the 4th attempt, try pressing inventory again (some UIs toggle)
-                    if attempt == 2:
+                # Check if we should use cached search bar coordinates (for subsequent items)
+                coords = None
+                if not open_inventory and self._cached_search_coords:
+                    # Reuse cached coordinates for subsequent items
+                    coords = self._cached_search_coords
+                    logger.info("macro=F2 phase=reuse_search_coords corr=%s coords=%s", corr, str(coords))
+                else:
+                    # Find search bar (for first item or when cache not available)
+                    t_phase = _t.perf_counter()
+                    for attempt in range(5):
+                        # Gradually relax confidence from 0.70 down to 0.50
+                        conf = max(0.50, 0.70 - 0.03 * attempt)
                         try:
-                            if hasattr(input_controller, 'press_token'):
-                                input_controller.press_token(inv_token)
-                            else:
-                                name = inv_token.split('_', 1)[1] if '_' in inv_token else inv_token
-                                if inv_token.startswith('key_'):
-                                    input_controller.press_key(name)
+                            if self.overlay:
+                                self.overlay.set_status(f"Finding search bar… attempt {attempt+1}/8 (conf>={conf:.2f})")
+                        except Exception:
+                            pass
+
+                        try:
+                            coords = self._find_search_bar(vision_controller, tmpl, conf, _abs_roi_env)
+                        except Exception as e:
+                            logger.exception("macro=F2 phase=find_bar corr=%s attempt=%d error=%s",
+                                           corr, attempt + 1, str(e))
+                            coords = None
+
+                        if coords:
+                            logger.info("macro=F2 phase=find_bar corr=%s attempt=%d result=match coords=%s conf>=%.2f",
+                                      corr, attempt + 1, str(coords), conf)
+                            self._log_monitor_detection(coords)
+                            # Cache coordinates for subsequent items
+                            self._cached_search_coords = coords
+                            break
+
+                        # On the 5th attempt (last), try pressing inventory again as final attempt
+                        if attempt == 4:
+                            try:
+                                if self.overlay:
+                                    self.overlay.set_status("Retrying inventory open (final attempt)...")
+                                if hasattr(input_controller, 'press_token'):
+                                    input_controller.press_token(inv_token)
+                                else:
+                                    name = inv_token.split('_', 1)[1] if '_' in inv_token else inv_token
+                                    if inv_token.startswith('key_'):
+                                        input_controller.press_key(name)
+                                time.sleep(0.5)  # Give more time after reopening
+                            except Exception:
+                                pass
+
+                        try:
+                            time.sleep(0.04)
                         except Exception:
                             pass
 
                     try:
-                        time.sleep(0.04)
+                        logger.info("macro=F2 phase=find_bar corr=%s duration_ms=%.1f found=%s",
+                                  corr, (_t.perf_counter() - t_phase) * 1000.0, bool(coords))
                     except Exception:
                         pass
-
-                try:
-                    logger.info("macro=F2 phase=find_bar corr=%s duration_ms=%.1f found=%s",
-                              corr, (_t.perf_counter() - t_phase) * 1000.0, bool(coords))
-                except Exception:
-                    pass
 
                 if not coords:
                     self._handle_search_miss(vision_controller)
@@ -162,6 +199,28 @@ class SearchService:
 
             except Exception:
                 pass
+            finally:
+                # Close inventory at the end of the search task (only if requested)
+                if close_inventory:
+                    try:
+                        # Prefer a dedicated close key (defaults to ESC) for reliable closing
+                        close_token = self._get_token('inventory_close_key', 'key_esc')
+                        if hasattr(input_controller, 'press_token'):
+                            input_controller.press_token(close_token)
+                        else:
+                            name = close_token.split('_', 1)[1] if '_' in close_token else close_token
+                            if close_token.startswith('key_'):
+                                input_controller.press_key(name)
+                        logger.info("macro=F2 phase=close_inventory corr=%s token=%s", corr, close_token)
+                        # Brief settle to allow UI to close
+                        try:
+                            _t.sleep(0.25)
+                        except Exception:
+                            pass
+                        # Clear cached search coordinates when inventory is closed
+                        self._cached_search_coords = None
+                    except Exception:
+                        pass
 
         try:
             setattr(_job, '_gw_task_id', 'search_and_type')
@@ -394,7 +453,9 @@ class SearchService:
 
         # Give the game a brief moment to apply the filter before scanning
         try:
-            _t.sleep(0.05)
+            # Give the game a brief moment to apply the filter before scanning
+            # Slightly increased to improve reliability on slower frames
+            _t.sleep(0.10)
         except Exception:
             pass
 
@@ -540,19 +601,66 @@ class SearchService:
                             corr: str, logger, _t, vision_controller) -> None:
         """Perform item matching and equipment."""
         name_norm = str(text).strip().lower().replace(' ', '_')
+        # Continuous search within a time window before forcing move to next piece
+        window_sec = 1.0
+        try:
+            window_sec = float(os.getenv('GW_ITEM_MATCH_WINDOW', '1.0') or 1.0)
+        except Exception:
+            window_sec = 1.0
+
+        threshold = 0.17 if any(piece in name_norm for piece in ['chestpiece', 'gauntlets']) else 0.25
         start_match = _t.perf_counter()
         match = None
-        if self._armor_matcher is not None:
-            match = self._armor_matcher.best_for_name(roi_bgr, name_norm, threshold=0.22, early_exit=True)
-        dur_match = (_t.perf_counter() - start_match) * 1000.0
-        logger.info("macro=F2 phase=match_item corr=%s name=%s duration_ms=%.1f found=%s",
-                   corr, name_norm, dur_match, bool(match))
+        attempts = 0
+        while (_t.perf_counter() - start_match) < window_sec:
+            if self._armor_matcher is None:
+                break
+            attempts += 1
+            t_try = _t.perf_counter()
+            try:
+                match = self._armor_matcher.best_for_name(
+                    roi_bgr, name_norm, threshold=threshold, early_exit=True
+                )
+            except Exception:
+                match = None
+            dur_try = (_t.perf_counter() - t_try) * 1000.0
+            best_sc = None
+            try:
+                best_sc = self._armor_matcher.get_last_best(name_norm)
+            except Exception:
+                best_sc = None
+            logger.info(
+                (
+                    "macro=F2 phase=match_item_try corr=%s name=%s attempt=%d "
+                    "duration_ms=%.1f found=%s best_score=%s"
+                ),
+                corr, name_norm, attempts, dur_try, bool(match),
+                f"{float(best_sc):.3f}" if best_sc is not None else "n/a"
+            )
+            if match:
+                break
+            # Small pause and refresh ROI to catch items that load a frame later
+            try:
+                _t.sleep(0.05)
+            except Exception:
+                pass
+            try:
+                roi_bgr, roi_region = vision_controller.grab_inventory_bgr()
+            except Exception:
+                pass
+
+        total_match_ms = (_t.perf_counter() - start_match) * 1000.0
+        logger.info(
+            "macro=F2 phase=match_item_window corr=%s name=%s attempts=%d total_ms=%.1f found=%s",
+            corr, name_norm, attempts, total_match_ms, bool(match)
+        )
 
         if match:
             self._equip_matched_item(match, roi_bgr, roi_region, input_controller,
                                    corr, logger, _t, vision_controller)
         else:
             self._log_match_failure(name_norm, corr, logger)
+            # No fixed delay here; let the outer sequence advance to the next piece
 
     def _equip_matched_item(self, match, roi_bgr, roi_region: Dict, input_controller,
                           corr: str, logger, _t, vision_controller) -> None:
@@ -606,6 +714,29 @@ class SearchService:
         total_interaction = mouse_move_time + 2.0 + click_time + 1.0 + equip_time
         logger.info("macro=F2 phase=click_and_equip corr=%s mouse_ms=%.1f click_ms=%.1f equip_ms=%.1f total_ms=%.1f",
                    corr, mouse_move_time, click_time, equip_time, total_interaction)
+
+        # Move mouse back to search box area to prepare for next search
+        try:
+            # Prefer returning directly to the cached search bar coordinates (avoids extra visible hop)
+            coords_cached = getattr(self, '_cached_search_coords', None)
+            if coords_cached is not None:
+                sx, sy = coords_cached  # absolute screen coords
+                input_controller.move_mouse(int(sx), int(sy))
+                logger.info(
+                    "macro=F2 phase=return_to_search corr=%s using=cached coords=(%d,%d)",
+                    corr, int(sx), int(sy)
+                )
+            else:
+                # Fallback: use a neutral position above the inventory region
+                search_x = roi_region['left'] + roi_region['width'] // 2
+                search_y = roi_region['top'] - 50
+                input_controller.move_mouse(search_x, search_y)
+                logger.info(
+                    "macro=F2 phase=return_to_search corr=%s using=fallback moved_to=(%d,%d)",
+                    corr, search_x, search_y
+                )
+        except Exception:
+            pass
 
     def _capture_item_patch(self, roi_bgr, x: int, y: int, w: int, h: int):
         """Capture item patch for change detection."""

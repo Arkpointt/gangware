@@ -14,9 +14,9 @@ if getattr(sys, 'frozen', False):
     application_path = os.path.dirname(sys.executable)
     src_path = os.path.join(application_path, 'src')
 else:
-    # Running as script
-    application_path = os.path.dirname(os.path.abspath(__file__))
-    src_path = os.path.dirname(os.path.dirname(application_path))
+    # Running as script - go up from gangware/main.py to src directory
+    application_path = os.path.dirname(os.path.abspath(__file__))  # gangware dir
+    src_path = os.path.dirname(application_path)  # src dir
 
 if src_path not in sys.path:
     sys.path.insert(0, src_path)
@@ -25,6 +25,7 @@ from gangware.core.config import ConfigManager
 from gangware.core.state import StateManager
 from gangware.core.hotkey_manager import HotkeyManager
 from gangware.core.worker import Worker
+from gangware.core.resolution_monitor import ResolutionMonitor
 from gangware.vision.controller import VisionController
 from gangware.io.controls import InputController
 from gangware.core.logging_setup import setup_logging
@@ -95,7 +96,10 @@ def main() -> None:
     task_queue: queue.Queue = queue.Queue()
 
     # Start hotkey listener thread (pass overlay for status updates / calibration prompts)
-    hotkey_manager = HotkeyManager(config_manager, task_queue, state_manager, input_controller=input_controller, overlay=overlay)
+    hotkey_manager = HotkeyManager(
+        config_manager, task_queue, state_manager,
+        input_controller=input_controller, overlay=overlay
+    )
     # Connect overlay shortcuts before starting threads to ensure signals are handled
     overlay.on_recalibrate(lambda: hotkey_manager.request_recalibration())
     overlay.on_start(lambda: hotkey_manager.allow_calibration_start())
@@ -111,6 +115,10 @@ def main() -> None:
         status_callback=overlay,
     )
     worker.start()
+
+    # Start resolution monitor thread
+    resolution_monitor = ResolutionMonitor(config_manager, overlay, interval=10.0)
+    resolution_monitor.start()
 
     # Health monitoring (lightweight, configurable)
     try:

@@ -5,7 +5,6 @@ This will add a simpler, more robust version.
 """
 
 import sys
-import os
 from pathlib import Path
 
 # Add src to path

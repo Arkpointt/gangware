@@ -55,8 +55,12 @@ class ScrollingLabel(QLabel):
         text_width = metrics.horizontalAdvance(self._full_text)
 
         if text_width > self._max_width:
-            # Start scrolling
-            super().setText(self._full_text)
+            # Start with truncated text to prevent stretching
+            visible_chars = min(25, len(self._full_text))
+            initial_text = self._full_text[:visible_chars]
+            if len(self._full_text) > visible_chars:
+                initial_text += "..."
+            super().setText(initial_text)
             self._start_scroll_cycle()
         else:
             # No scrolling needed

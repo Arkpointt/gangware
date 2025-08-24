@@ -68,7 +68,7 @@ class SearchService:
 
                     try:
                         if self.overlay:
-                            self.overlay.set_status(f"Opening inventory with {self._token_display(inv_token)}...")
+                            self.overlay.set_status_safe(f"Opening inventory with {self._token_display(inv_token)}...")
                         # Use press_token to support mouse buttons like XBUTTON2
                         if hasattr(input_controller, 'press_token'):
                             input_controller.press_token(inv_token)
@@ -98,7 +98,7 @@ class SearchService:
                 # 2) Locate the saved template path
                 tmpl = self.config_manager.get('search_bar_template')
                 if not tmpl:
-                    self._log('Search bar template not set. Use F8 on Calibration page.')
+                    self._log('Search bar template not set. Use F7 with Inv Search to capture coordinates.')
                     return
 
                 # F6 ROI constraints are bypassed for search-bar detection to ensure visibility.
@@ -123,62 +123,89 @@ class SearchService:
 
                 # Check if we should use cached search bar coordinates (for subsequent items)
                 coords = None
+                tmpl = None  # Initialize template path
                 if not open_inventory and self._cached_search_coords:
                     # Reuse cached coordinates for subsequent items
                     coords = self._cached_search_coords
                     logger.info("macro=F2 phase=reuse_search_coords corr=%s coords=%s", corr, str(coords))
                 else:
-                    # Find search bar (for first item or when cache not available)
-                    t_phase = _t.perf_counter()
-                    for attempt in range(5):
-                        # Gradually relax confidence from 0.70 down to 0.50
-                        conf = max(0.50, 0.70 - 0.03 * attempt)
+                    # Check for saved search bar coordinates first (from F7 Inv Search capture)
+                    saved_coords_str = self.config_manager.get('search_bar_coords')
+                    if saved_coords_str and ',' in saved_coords_str:
                         try:
+                            x, y = map(int, saved_coords_str.split(','))
+                            coords = (x, y)
+                            self._cached_search_coords = coords
+                            logger.info("macro=F2 phase=use_saved_coords corr=%s coords=(%d,%d)", corr, x, y)
                             if self.overlay:
-                                self.overlay.set_status(f"Finding search bar… attempt {attempt+1}/8 (conf>={conf:.2f})")
-                        except Exception:
-                            pass
-
-                        try:
-                            coords = self._find_search_bar(vision_controller, tmpl, conf, _abs_roi_env)
+                                self.overlay.set_status_safe(f"Using saved search bar coordinates: ({x}, {y})")
                         except Exception as e:
-                            logger.exception("macro=F2 phase=find_bar corr=%s attempt=%d error=%s",
-                                           corr, attempt + 1, str(e))
+                            logger.warning("Failed to parse saved search bar coordinates '%s': %s", saved_coords_str, e)
                             coords = None
 
-                        if coords:
-                            logger.info("macro=F2 phase=find_bar corr=%s attempt=%d result=match coords=%s conf>=%.2f",
-                                      corr, attempt + 1, str(coords), conf)
-                            self._log_monitor_detection(coords)
-                            # Cache coordinates for subsequent items
-                            self._cached_search_coords = coords
-                            break
+                    # If no saved coordinates, fall back to template search
+                    if coords is None:
+                        # 2) Locate the saved template path
+                        tmpl = self.config_manager.get('search_bar_template')
+                        if not tmpl:
+                            self._log('Search bar template not set. Use F7 with Inv Search to capture coordinates.')
+                            return
 
-                        # On the 5th attempt (last), try pressing inventory again as final attempt
-                        if attempt == 4:
+                        # Find search bar using template matching
+                        t_phase = _t.perf_counter()
+                        for attempt in range(5):
+                            # Gradually relax confidence from 0.70 down to 0.50
+                            conf = max(0.50, 0.70 - 0.03 * attempt)
                             try:
                                 if self.overlay:
-                                    self.overlay.set_status("Retrying inventory open (final attempt)...")
-                                if hasattr(input_controller, 'press_token'):
-                                    input_controller.press_token(inv_token)
-                                else:
-                                    name = inv_token.split('_', 1)[1] if '_' in inv_token else inv_token
-                                    if inv_token.startswith('key_'):
-                                        input_controller.press_key(name)
-                                time.sleep(0.5)  # Give more time after reopening
+                                    self.overlay.set_status_safe(
+                                        f"Finding search bar… attempt {attempt+1}/8 (conf>={conf:.2f})"
+                                    )
+                            except Exception:
+                                pass
+
+                            try:
+                                coords = self._find_search_bar(vision_controller, tmpl, conf, _abs_roi_env)
+                            except Exception as e:
+                                logger.exception("macro=F2 phase=find_bar corr=%s attempt=%d error=%s",
+                                               corr, attempt + 1, str(e))
+                                coords = None
+
+                            if coords:
+                                logger.info(
+                                    "macro=F2 phase=find_bar corr=%s attempt=%d result=match coords=%s conf>=%.2f",
+                                    corr, attempt + 1, str(coords), conf
+                                )
+                                self._log_monitor_detection(coords)
+                                # Cache coordinates for subsequent items
+                                self._cached_search_coords = coords
+                                break
+
+                            # On the 5th attempt (last), try pressing inventory again as final attempt
+                            if attempt == 4:
+                                try:
+                                    if self.overlay:
+                                        self.overlay.set_status_safe("Retrying inventory open (final attempt)...")
+                                    if hasattr(input_controller, 'press_token'):
+                                        input_controller.press_token(inv_token)
+                                    else:
+                                        name = inv_token.split('_', 1)[1] if '_' in inv_token else inv_token
+                                        if inv_token.startswith('key_'):
+                                            input_controller.press_key(name)
+                                    time.sleep(0.5)  # Give more time after reopening
+                                except Exception:
+                                    pass
+
+                            try:
+                                time.sleep(0.04)
                             except Exception:
                                 pass
 
                         try:
-                            time.sleep(0.04)
+                            logger.info("macro=F2 phase=find_bar corr=%s duration_ms=%.1f found=%s",
+                                      corr, (_t.perf_counter() - t_phase) * 1000.0, bool(coords))
                         except Exception:
                             pass
-
-                    try:
-                        logger.info("macro=F2 phase=find_bar corr=%s duration_ms=%.1f found=%s",
-                                  corr, (_t.perf_counter() - t_phase) * 1000.0, bool(coords))
-                    except Exception:
-                        pass
 
                 if not coords:
                     self._handle_search_miss(vision_controller)
@@ -187,12 +214,12 @@ class SearchService:
                 # 3) Click, clear field safely, type text (avoid Ctrl+A to prevent stray 'A')
                 try:
                     if self.overlay:
-                        self.overlay.set_status("Clicking search box and typing...")
+                        self.overlay.set_status_safe("Clicking search box and typing...")
                     self._perform_search_input(input_controller, coords, text, corr, logger, _t)
 
                     # 4) ROI calibration and item matching
                     self._perform_item_matching(vision_controller, input_controller, text,
-                                              _abs_roi_env, tmpl, corr, logger, _t)
+                                              _abs_roi_env, tmpl or "", corr, logger, _t)
 
                 except Exception:
                     pass
@@ -219,6 +246,9 @@ class SearchService:
                             pass
                         # Clear cached search coordinates when inventory is closed
                         self._cached_search_coords = None
+                        # Reset overlay status to operational when armor swapping sequence completes
+                        if self.overlay:
+                            self.overlay.set_status_safe("STATUS: OPERATIONAL")
                     except Exception:
                         pass
 
@@ -245,7 +275,7 @@ class SearchService:
     def _log(self, message: str) -> None:
         """Log message with overlay update."""
         if self.overlay:
-            self.overlay.set_status(message)
+            self.overlay.set_status_safe(message)
 
     def _find_search_bar(self, vision_controller, tmpl: str, conf: float,
                         _abs_roi_env: str) -> Optional[Tuple[int, int]]:
@@ -602,9 +632,9 @@ class SearchService:
         """Perform item matching and equipment."""
         name_norm = str(text).strip().lower().replace(' ', '_')
         # Continuous search within a time window before forcing move to next piece
-        window_sec = 1.0
+        window_sec = 0.7  # Reduced from 1.0 for faster swaps
         try:
-            window_sec = float(os.getenv('GW_ITEM_MATCH_WINDOW', '1.0') or 1.0)
+            window_sec = float(os.getenv('GW_ITEM_MATCH_WINDOW', '0.7') or 0.7)
         except Exception:
             window_sec = 1.0
 
@@ -679,7 +709,7 @@ class SearchService:
         mouse_move_time = (_t.perf_counter() - start_mouse) * 1000.0
 
         try:
-            _t.sleep(0.025)  # small settle after moving mouse
+            _t.sleep(0.015)  # reduced from 0.025 for faster interaction
         except Exception:
             pass
 
@@ -688,7 +718,7 @@ class SearchService:
         click_time = (_t.perf_counter() - start_click) * 1000.0
 
         try:
-            _t.sleep(0.045)  # let the item focus register
+            _t.sleep(0.030)  # reduced from 0.045 for faster equipment
         except Exception:
             pass
 
@@ -696,13 +726,13 @@ class SearchService:
         # Ensure equip registers: double E press with minimal interval
         input_controller.press_key('e', presses=1, interval=0.0)
         try:
-            _t.sleep(0.090)  # slight gap for game to register E
+            _t.sleep(0.060)  # reduced from 0.090 for faster E-press timing
         except Exception:
             pass
         input_controller.press_key('e', presses=1, interval=0.0)
         # Small settle after second E before verifying
         try:
-            _t.sleep(0.030)
+            _t.sleep(0.020)  # reduced from 0.030 for faster verification
         except Exception:
             pass
 

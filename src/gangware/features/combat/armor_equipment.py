@@ -19,11 +19,13 @@ class ArmorEquipmentService:
         self,
         config_manager: Any,
         input_controller: Optional[Any] = None,
-        search_service: Optional[Any] = None
+        search_service: Optional[Any] = None,
+        overlay: Optional[Any] = None
     ):
         self.config_manager = config_manager
         self.input_controller = input_controller
         self.search_service = search_service
+        self.overlay = overlay
 
     def _resolve_asset_path(self, relative_path: str) -> str:
         """Resolve asset path relative to project root.
@@ -106,12 +108,19 @@ class ArmorEquipmentService:
                         open_inventory=is_first_piece
                     )
                     search_task(vision_controller, ic)
-                    time.sleep(0.25)  # Faster pause between pieces (reduced from 0.5s)
+                    time.sleep(0.15)  # Further reduced from 0.25s for faster swaps
 
                 logger.info("Flak armor equipment task completed")
 
+                # Show success feedback
+                if self.overlay and hasattr(self.overlay, 'show_success_feedback'):
+                    self.overlay.show_success_feedback("F2", "✅ Flak Armor Equipped Successfully!")
+
             except Exception as e:
                 logger.error(f"Flak armor equipment task failed: {e}")
+                # Show error feedback
+                if self.overlay and hasattr(self.overlay, 'set_status_safe'):
+                    self.overlay.set_status_safe(f"❌ Flak Armor Failed: {e}")
 
         # Tag the task for identification
         task._gw_task_id = "equip_flak_fullset"  # type: ignore
@@ -160,12 +169,19 @@ class ArmorEquipmentService:
                         open_inventory=is_first_piece
                     )
                     search_task(vision_controller, ic)
-                    time.sleep(0.25)  # Faster pause between pieces (reduced from 0.5s)
+                    time.sleep(0.15)  # Further reduced from 0.25s for faster swaps
 
                 logger.info("Tek armor equipment task completed")
 
+                # Show success feedback
+                if self.overlay and hasattr(self.overlay, 'show_success_feedback'):
+                    self.overlay.show_success_feedback("F3", "✅ Tek Armor Equipped Successfully!")
+
             except Exception as e:
                 logger.error(f"Tek armor equipment task failed: {e}")
+                # Show error feedback
+                if self.overlay and hasattr(self.overlay, 'set_status_safe'):
+                    self.overlay.set_status_safe(f"❌ Tek Armor Failed: {e}")
 
         # Tag the task for identification
         task._gw_task_id = "equip_tek_fullset"  # type: ignore
@@ -217,8 +233,15 @@ class ArmorEquipmentService:
 
                 logger.info("Mixed armor equipment task (F4) completed")
 
+                # Show success feedback
+                if self.overlay and hasattr(self.overlay, 'show_success_feedback'):
+                    self.overlay.show_success_feedback("F4", "✅ Mixed Armor Equipped Successfully!")
+
             except Exception as e:
                 logger.error(f"Mixed armor equipment task failed: {e}")
+                # Show error feedback
+                if self.overlay and hasattr(self.overlay, 'set_status_safe'):
+                    self.overlay.set_status_safe(f"❌ Mixed Armor Failed: {e}")
 
         # Tag the task for identification
         task._gw_task_id = "equip_mixed_fullset"  # type: ignore

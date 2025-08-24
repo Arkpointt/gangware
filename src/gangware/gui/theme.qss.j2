@@ -105,5 +105,60 @@ QWidget {
 #calTitle { color: {{ ORANGE }}; font-size: {{ SECTION_SIZE }}px; font-weight: 800; }
 #hint { color: {{ TEXT_DEFAULT }}; }
 
+/* Scroll area styling */
+#scrollArea {
+  background: transparent;
+  border: none;
+}
+#scrollArea QScrollBar:vertical {
+  background-color: rgba(18,28,40,0.40);
+  width: 12px;
+  border-radius: 6px;
+  border: 1px solid rgba(0,221,255,0.20);
+}
+#scrollArea QScrollBar::handle:vertical {
+  background-color: rgba(0,221,255,0.35);
+  border-radius: 5px;
+  min-height: 20px;
+}
+#scrollArea QScrollBar::handle:vertical:hover {
+  background-color: rgba(0,221,255,0.50);
+}
+
+/* Dropdown/ComboBox styling */
+#dropdown {
+  background-color: rgba(18,28,40,0.80);
+  border: 1px solid rgba(0,221,255,0.40);
+  border-radius: 6px;
+  padding: 6px 10px;
+  color: {{ TEXT_DEFAULT }};
+  font-weight: 600;
+  min-height: 24px;
+}
+#dropdown:hover {
+  background-color: rgba(0,221,255,0.15);
+  border-color: rgba(0,221,255,0.60);
+}
+#dropdown::drop-down {
+  border: none;
+  width: 20px;
+}
+#dropdown::down-arrow {
+  image: none;
+  border-left: 5px solid transparent;
+  border-right: 5px solid transparent;
+  border-top: 5px solid {{ CYAN }};
+  width: 0px;
+  height: 0px;
+}
+#dropdown QAbstractItemView {
+  background-color: rgba(18,28,40,0.95);
+  border: 1px solid rgba(0,221,255,0.60);
+  border-radius: 6px;
+  color: {{ TEXT_DEFAULT }};
+  selection-background-color: rgba(0,221,255,0.30);
+  outline: none;
+}
+
 /* Optional operational variant for green status */
 #status[variant="operational"] { color: {{ STATUS_OK }}; }

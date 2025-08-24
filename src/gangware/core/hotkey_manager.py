@@ -6,16 +6,13 @@ This implementation provides:
 - A calibration flow to capture user-specific keys: the Inventory key and the Tek Punch Cancel key.
   The captured values are persisted into the provided ConfigManager under DEFAULT as
   `inventory_key` and `tek_punch_cancel_key`.
-- Template capture step: prompts user to open inventory, hover the search bar,
-  and press F8 to capture a small image region saved as a template. The path is
-  stored under `search_bar_template`.
+- Coordinate capture for specific locations like inventory search bar using F7 with coordinate dropdown.
 - Global hotkey handling (RegisterHotKey + polling fallbacks):
   - Global: F1 toggles overlay, F7 starts/captures calibration, F9 stops calibration, F10 exit
   - In-game only: F2, F3, F4, Shift+Q, Shift+E, Shift+R
     (Only enqueue tasks when ArkAscended.exe is the active window)
 
-Calibration uses the Windows GetAsyncKeyState polling to detect key/mouse input and mss to grab
-screen regions for template capture. Calibration is marked complete only after the template is saved.
+Calibration uses the Windows GetAsyncKeyState polling to detect key/mouse input.
 """
 
 import threading
@@ -23,13 +20,11 @@ import time
 from typing import Optional, Tuple, Callable, Dict
 import sys
 import os
-from pathlib import Path
 
 import mss
 import numpy as np
 from ..features.combat.armor_matcher import ArmorMatcher
 from ..features.debug.keys import capture_input_windows, wait_key_release
-from ..features.debug.template import wait_and_capture_template
 
 import ctypes
 import logging
@@ -171,8 +166,6 @@ class HotkeyManager(threading.Thread):
                             "tek_punch_cancel_key", "Press your Tek Punch Cancel key (keyboard or mouse)", is_tek=True
                         )
                     )
-                if hasattr(self.overlay, "on_capture_template"):
-                    self.overlay.on_capture_template(self._ui_capture_template)
                 if hasattr(self.overlay, "on_capture_roi"):
                     # Show a short tip: F6 twice to set top-left and bottom-right
                     self.overlay.on_capture_roi(lambda: self._tip_roi_capture())
@@ -182,6 +175,12 @@ class HotkeyManager(threading.Thread):
                 # Overlay recalibration (F7 or button) should trigger the flow
                 if hasattr(self.overlay, "on_recalibrate"):
                     self.overlay.on_recalibrate(self.request_recalibration)
+                # Connect coordinate capture signal
+                if hasattr(self.overlay, "on_capture_coordinates"):
+                    self.overlay.on_capture_coordinates(self._handle_coordinate_capture)
+                # Connect enhanced ROI capture signal
+                if hasattr(self.overlay, "on_capture_roi_enhanced"):
+                    self.overlay.on_capture_roi_enhanced(self._handle_roi_capture)
 
         except Exception:
             pass
@@ -382,71 +381,6 @@ class HotkeyManager(threading.Thread):
             pass
 
     # --------------------------- Hotkey hook (Windows) ----------------------------
-    def _start_low_level_hook(self) -> None:
-        """Start backup keyboard detection to ensure Shift+R is never missed."""
-        if sys.platform != "win32":
-            return
-
-        logger = logging.getLogger(__name__)
-
-        try:
-            import ctypes
-            from ctypes import wintypes
-
-            WH_KEYBOARD_LL = 13
-            WM_KEYDOWN = 0x0100
-            VK_R = 0x52
-            VK_LSHIFT = 0xA0
-            VK_RSHIFT = 0xA1
-
-            # Store hook state
-            self._hook_id = None
-            self._hook_proc = None
-
-            def low_level_keyboard_proc(nCode: int, wParam: wintypes.WPARAM, lParam: wintypes.LPARAM) -> int:
-                try:
-                    if nCode >= 0 and wParam == WM_KEYDOWN:
-                        # Check if R key is being pressed
-                        vk_code = ctypes.cast(lParam, ctypes.POINTER(ctypes.c_int)).contents.value
-                        if vk_code == VK_R:
-                            # Check if either shift key is pressed
-                            left_shift = ctypes.windll.user32.GetAsyncKeyState(VK_LSHIFT) & 0x8000
-                            right_shift = ctypes.windll.user32.GetAsyncKeyState(VK_RSHIFT) & 0x8000
-
-                            if left_shift or right_shift:
-                                # This is a Shift+R - let RegisterHotKey handle it, don't block here
-                                # Only log for debugging if needed
-                                pass
-                except Exception:
-                    pass  # Don't crash the hook on any error
-
-                # Let the key through - call next hook
-                try:
-                    return ctypes.windll.kernel32.CallNextHookExW(self._hook_id, nCode, wParam, lParam)
-                except Exception:
-                    return 0
-
-            # Set up the hook
-            HOOKPROC = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM)
-            self._hook_proc = HOOKPROC(low_level_keyboard_proc)
-
-            self._hook_id = ctypes.windll.user32.SetWindowsHookExW(
-                WH_KEYBOARD_LL,
-                self._hook_proc,
-                ctypes.windll.kernel32.GetModuleHandleW(None),
-                0
-            )
-
-            if self._hook_id:
-                logger.info("Backup hotkey detection system activated for enhanced reliability")
-                # Don't block - let hook run asynchronously
-            else:
-                logger.warning("Backup hotkey detection could not start - primary system still functional")
-
-        except Exception as e:
-            logger.error(f"Backup hotkey detection failed to start: {e}")
-            import traceback
-            logger.debug(f"Technical details: {traceback.format_exc()}")
 
     def _start_hotkey_hook(self) -> None:
         """Start a Windows message loop thread to catch global hotkeys via RegisterHotKey."""
@@ -455,9 +389,6 @@ class HotkeyManager(threading.Thread):
         try:
             t = threading.Thread(target=self._hotkey_msg_loop, daemon=True)
             t.start()
-            # Also start low-level keyboard hook as backup for Shift+R
-            hook_t = threading.Thread(target=self._start_low_level_hook, daemon=True)
-            hook_t.start()
         except Exception:
             pass
 
@@ -493,7 +424,6 @@ class HotkeyManager(threading.Thread):
         HK_S_E = 8
         HK_S_R = 9
         HK_F6 = 10
-        HK_F8 = 11
         HK_F9 = 12
         HK_F11 = 13
 
@@ -501,13 +431,12 @@ class HotkeyManager(threading.Thread):
         MOD_NONE = 0x0000
         MOD_SHIFT = 0x0004
         VK_F1, VK_F2, VK_F3, VK_F4 = 0x70, 0x71, 0x72, 0x73
-        VK_F6, VK_F7, VK_F8, VK_F9, VK_F10 = 0x75, 0x76, 0x77, 0x78, 0x79
+        VK_F6, VK_F7, VK_F9, VK_F10 = 0x75, 0x76, 0x78, 0x79
         VK_F11 = 0x7A
         VK_Q, VK_E, VK_R = 0x51, 0x45, 0x52
 
         # Register global hotkeys via helper
         self._has_reg_f7 = self._reg_hotkey(HK_F7, MOD_NONE, VK_F7, "F7")
-        self._reg_hotkey(HK_F8, MOD_NONE, VK_F8, "F8")
         self._reg_hotkey(HK_F9, MOD_NONE, VK_F9, "F9")
         self._reg_hotkey(HK_F10, MOD_NONE, VK_F10, "F10")
         self._has_reg_f1 = self._reg_hotkey(HK_F1, MOD_NONE, VK_F1, "F1")
@@ -529,7 +458,7 @@ class HotkeyManager(threading.Thread):
 
         # Map IDs to handlers
         self._hotkey_handlers = self._build_hotkey_handlers(
-            HK_F1, HK_F7, HK_F8, HK_F9, HK_F10, HK_F2, HK_F3, HK_F4, HK_S_Q, HK_S_E, HK_S_R, HK_F6, HK_F11
+            HK_F1, HK_F7, HK_F9, HK_F10, HK_F2, HK_F3, HK_F4, HK_S_Q, HK_S_E, HK_S_R, HK_F6, HK_F11
         )
 
     def _reg_hotkey(self, id_: int, mod: int, vk: int, name: str) -> bool:
@@ -555,7 +484,6 @@ class HotkeyManager(threading.Thread):
         self,
         hk_f1: int,
         hk_f7: int,
-        hk_f8: int,
         hk_f9: int,
         hk_f10: int,
         hk_f2: int,
@@ -570,7 +498,6 @@ class HotkeyManager(threading.Thread):
         return {
             hk_f1: self._on_hotkey_f1,
             hk_f7: self._on_hotkey_f7,
-            hk_f8: self._on_hotkey_f8,
             hk_f9: self._on_hotkey_f9,
             hk_f10: self._maybe_exit_on_f10,
             hk_f2: lambda: self._handle_macro_hotkey(self._task_equip_flak_fullset(), "F2"),
@@ -587,37 +514,26 @@ class HotkeyManager(threading.Thread):
         self._toggle_overlay_visibility()
 
     def _on_hotkey_f7(self) -> None:
-        """Trigger recalibration when F7 is pressed."""
+        """F7 hotkey handler - recalibration or coordinate capture."""
         try:
-            self._recalibrate_event.set()
-        except Exception:
-            pass
+            # Check if calibration is complete
+            calibration_complete = (
+                self.config_manager.get("calibration_complete", fallback="False") == "True"
+            )
 
-    def _on_hotkey_f8(self) -> None:
-        """F8 hotkey handler - capture search bar template."""
-        try:
-            if self.overlay:
-                self.overlay.set_status("F8: Position cursor over search bar, then press Enter to capture template.")
-
-            # Import the template capture function
-            from ..features.debug.template import wait_and_capture_template
-
-            # Capture template at cursor location
-            tmpl_path = wait_and_capture_template(self.config_manager, self.overlay)
-
-            if tmpl_path:
-                # Save template path to config
-                self.config_manager.config["DEFAULT"]["search_bar_template"] = str(tmpl_path)
-                self.config_manager.save()
-
-                if self.overlay:
-                    self.overlay.set_status(f"F8: Search bar template captured and saved: {tmpl_path.name}")
+            if calibration_complete and self.overlay:
+                # Coordinate capture mode - trigger the selected element capture
+                if hasattr(self.overlay, "trigger_coordinate_capture"):
+                    self.overlay.trigger_coordinate_capture()
+                else:
+                    # Fallback: trigger recalibration if coordinate capture isn't available
+                    self._recalibrate_event.set()
             else:
-                if self.overlay:
-                    self.overlay.set_status("F8: Template capture cancelled or failed.")
-        except Exception as e:
-            if self.overlay:
-                self.overlay.set_status(f"F8: Error capturing template: {e}")
+                # Calibration mode - trigger recalibration
+                self._recalibrate_event.set()
+        except Exception:
+            # Fallback: always trigger recalibration on error
+            self._recalibrate_event.set()
 
     def _on_hotkey_f11(self) -> None:
         """F11 hotkey handler - currently disabled."""
@@ -628,11 +544,25 @@ class HotkeyManager(threading.Thread):
         pass
 
     def _on_hotkey_f6(self) -> None:
-        """Two-press manual ROI capture (F6): first press stores top-left, second sets bottom-right.
+        """Enhanced ROI capture (F6) with dropdown selection support.
 
-        Saves relative ROI as percentages and persists under config key 'vision_roi'.
-        Sets absolute ROI in GW_VISION_ROI for current session.
+        Now supports different capture modes based on overlay dropdown selection:
+        - DEBUG: Only logs and screenshots, doesn't save to INI
+        - Other modes: Save to INI as before
         """
+        # Check if overlay has the new enhanced ROI dropdown
+        if self.overlay and hasattr(self.overlay, 'trigger_roi_capture'):
+            try:
+                self.overlay.trigger_roi_capture()
+                return
+            except Exception:
+                pass
+
+        # Fallback to original two-press ROI capture
+        self._original_f6_capture()
+
+    def _original_f6_capture(self) -> None:
+        """Original two-press manual ROI capture: first press stores top-left, second sets bottom-right."""
         if user32 is None:
             return
         try:
@@ -644,7 +574,7 @@ class HotkeyManager(threading.Thread):
             self._roi_first_corner = (x, y)
             if self.overlay:
                 try:
-                    self.overlay.set_status("ROI: first corner saved. Move to bottom-right and press F6 again.")
+                    self.overlay.set_status_safe("ROI: first corner saved. Move to bottom-right and press F6 again.")
                     if hasattr(self.overlay, "set_roi_status"):
                         # Mark as pending while capturing
                         self.overlay.set_roi_status(False)
@@ -661,7 +591,7 @@ class HotkeyManager(threading.Thread):
         if width < 8 or height < 8:
             if self.overlay:
                 try:
-                    self.overlay.set_status("ROI too small — press F6 twice again.")
+                    self.overlay.set_status_safe("ROI too small — press F6 twice again.")
                 except Exception:
                     pass
             return
@@ -678,6 +608,54 @@ class HotkeyManager(threading.Thread):
         os.environ["GW_VISION_ROI"] = abs_roi_str
 
         # Convert to relative coordinates for storage
+        rel_left = (left - monitor_bounds["left"]) / monitor_bounds["width"]
+        rel_top = (top - monitor_bounds["top"]) / monitor_bounds["height"]
+        rel_width = width / monitor_bounds["width"]
+        rel_height = height / monitor_bounds["height"]
+        rel_roi_str = f"{rel_left:.4f},{rel_top:.4f},{rel_width:.4f},{rel_height:.4f}"
+
+        # Save to config
+        self.config_manager.config["DEFAULT"]["vision_roi"] = rel_roi_str
+        self.config_manager.save()
+        logging.getLogger(__name__).info("F6: saved relative ROI: %s (absolute: %s)", rel_roi_str, abs_roi_str)
+
+        # Save a snapshot image of the selected ROI for user confirmation
+        snapshot_path_str = None
+        try:
+            with mss.mss() as sct:
+                region = {"left": int(left), "top": int(top), "width": int(width), "height": int(height)}
+                grabbed = sct.grab(region)
+                bgr = np.array(grabbed)[:, :, :3]  # drop alpha
+            base_dir = self.config_manager.config_path.parent
+            out_dir = base_dir / "templates"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            out_path = out_dir / "roi.png"
+            try:
+                import cv2  # ensure available in this scope
+                cv2.imwrite(str(out_path), bgr)
+                snapshot_path_str = str(out_path)
+            except Exception:
+                snapshot_path_str = None
+        except Exception:
+            snapshot_path_str = None
+
+        if self.overlay:
+            try:
+                if snapshot_path_str:
+                    self.overlay.set_status(
+                        f"ROI set to {width}x{height} at ({left},{top}) [Relative: {rel_roi_str[:20]}...]. "
+                        f"Saved snapshot: {snapshot_path_str}. F6 twice to change."
+                    )
+                else:
+                    self.overlay.set_status(
+                        f"ROI set to {width}x{height} at ({left},{top}) [Relative]. "
+                        f"(Snapshot save failed.) F6 twice to change."
+                    )
+                if hasattr(self.overlay, "set_roi_status"):
+                    # Show absolute coordinates in overlay for user reference
+                    self.overlay.set_roi_status(True, abs_roi_str)
+            except Exception:
+                self.overlay.set_status("ROI capture: move to top-left and press F6, then bottom-right and press F6.")
         rel_roi_str = w32.absolute_to_relative_roi(abs_roi_str, monitor_bounds)
 
         # Persist relative coordinates in config
@@ -800,8 +778,39 @@ class HotkeyManager(threading.Thread):
         if not self._is_ark_active():
             # Silently ignore when Ark isn't the foreground window (no toast)
             return
+
         from .task_management import TaskManager
         task_manager = TaskManager(self.task_queue, self.overlay)
+
+        # Special handling for armor tasks (F2/F3/F4)
+        if hotkey_label in ["F2", "F3", "F4"]:
+            try:
+                # Check if any armor task is currently pending
+                armor_pending = self._is_task_pending(lambda t: self._is_armor_task(t))
+                # Check if the same armor task is pending
+                same_armor_pending = self._is_task_pending(
+                    lambda t: self._is_same_armor_task(t, hotkey_label)
+                )
+
+                if armor_pending:
+                    if same_armor_pending:
+                        # Same armor type is already queued - ignore to prevent spam
+                        if self.overlay and hasattr(self.overlay, 'set_status_safe'):
+                            self.overlay.set_status_safe(
+                                f"⚠️ {hotkey_label} armor swap already in progress"
+                            )
+                        return
+                    else:
+                        # Different armor type - this will override the current one
+                        if self.overlay and hasattr(self.overlay, 'set_status_safe'):
+                            self.overlay.set_status_safe(f"🔄 Switching to {hotkey_label} armor...")
+
+            except Exception as e:
+                # If armor task detection fails, just proceed with normal handling
+                logger = logging.getLogger(__name__)
+                logger.error(f"Error in armor task detection: {e}")
+
+        # Queue the task normally
         task_manager.handle_macro_hotkey(task_callable, hotkey_label)
 
     def _on_hotkey_shift_e(self) -> None:
@@ -975,6 +984,36 @@ class HotkeyManager(threading.Thread):
         from .task_management import TaskManager
         return TaskManager.is_tek_punch_task(task_obj)
 
+    @staticmethod
+    def _is_armor_task(task_obj: object) -> bool:
+        """Check if a task object is an armor swapping task (F2/F3/F4)."""
+        try:
+            if callable(task_obj) and hasattr(task_obj, "_gw_task_id"):
+                task_id = getattr(task_obj, "_gw_task_id", "")
+                return task_id in ["equip_flak_fullset", "equip_tek_fullset", "equip_mixed_fullset"]
+        except Exception:
+            pass
+        return False
+
+    def _is_same_armor_task(self, task_obj: object, hotkey_label: str) -> bool:
+        """Check if task is the same armor type as the hotkey being pressed."""
+        try:
+            if not self._is_armor_task(task_obj):
+                return False
+            if not callable(task_obj) or not hasattr(task_obj, "_gw_task_id"):
+                return False
+
+            task_id = getattr(task_obj, "_gw_task_id", "")
+            hotkey_to_task = {
+                "F2": "equip_flak_fullset",
+                "F3": "equip_tek_fullset",
+                "F4": "equip_mixed_fullset"
+            }
+            return task_id == hotkey_to_task.get(hotkey_label)
+        except Exception:
+            pass
+        return False
+
     def _task_equip_armor(self, armor_set: str) -> Callable[[object, object], None]:
         def _job(vision_controller, input_controller):
             armor_swapper.execute(vision_controller, input_controller, armor_set)
@@ -982,19 +1021,40 @@ class HotkeyManager(threading.Thread):
 
     def _task_medbrew_burst(self) -> Callable[[object, object], None]:
         def _job(_vision_controller, input_controller):
-            combat.execute_medbrew_burst(input_controller)
+            try:
+                combat.execute_medbrew_burst(input_controller)
+                # Show success feedback
+                if self.overlay and hasattr(self.overlay, 'show_success_feedback'):
+                    self.overlay.show_success_feedback("Shift+Q", "✅ Medbrew Burst Complete!")
+            except Exception as e:
+                if self.overlay and hasattr(self.overlay, 'set_status_safe'):
+                    self.overlay.set_status_safe(f"❌ Medbrew Burst Failed: {e}")
         return _job
 
     def _task_medbrew_hot_toggle(self) -> Callable[[object, object], None]:
         # Legacy path preserved but not used; HOT now runs in its own thread
         def _job(_vision_controller, input_controller):
-            combat.execute_medbrew_hot_toggle(input_controller, self.overlay)
+            try:
+                combat.execute_medbrew_hot_toggle(input_controller, self.overlay)
+                # Show success feedback
+                if self.overlay and hasattr(self.overlay, 'show_success_feedback'):
+                    self.overlay.show_success_feedback("Shift+E", "✅ Medbrew HoT Activated!")
+            except Exception as e:
+                if self.overlay and hasattr(self.overlay, 'set_status_safe'):
+                    self.overlay.set_status_safe(f"❌ Medbrew HoT Failed: {e}")
         return _job
 
     def _task_tek_punch(self) -> Callable[[object, object], None]:
         def _job(_vision_controller, input_controller):
-            # Pass config manager so macro can read tek_punch_cancel_key
-            combat.execute_tek_punch(input_controller, self.config_manager)
+            try:
+                # Pass config manager so macro can read tek_punch_cancel_key
+                combat.execute_tek_punch(input_controller, self.config_manager)
+                # Show success feedback
+                if self.overlay and hasattr(self.overlay, 'show_success_feedback'):
+                    self.overlay.show_success_feedback("Shift+R", "✅ Tek Boost Complete!")
+            except Exception as e:
+                if self.overlay and hasattr(self.overlay, 'set_status_safe'):
+                    self.overlay.set_status_safe(f"❌ Tek Boost Failed: {e}")
         try:
             setattr(_job, "_gw_task_id", "tek_punch")
         except Exception:
@@ -1017,7 +1077,7 @@ class HotkeyManager(threading.Thread):
         """
         if user32 is None:
             if self.overlay:
-                self.overlay.set_status("Calibration is supported on Windows only.")
+                self.overlay.set_status_safe("Calibration is supported on Windows only.")
             return False
 
         try:
@@ -1035,23 +1095,13 @@ class HotkeyManager(threading.Thread):
             inv_key, tek_key = keys
             # Persist keys early
             self._save_keys(inv_key, tek_key)
-            # 2) Capture template
-            if self.overlay:
-                self.overlay.set_status(
-                    "Open your inventory, hover the search bar, then press F8 to capture."
-                )
-            tmpl_path = wait_and_capture_template(self.config_manager, self.overlay)
-            if not tmpl_path:
-                if self.overlay:
-                    self.overlay.set_status("Template capture cancelled or failed.")
-                return False
-            # 3) Finalize
-            self._finalize_calibration(inv_key, tek_key, tmpl_path)
+            # 2) Mark calibration complete - template capture is now handled separately via F7 coordinate system
+            self._finalize_calibration(inv_key, tek_key)
             return True
         except Exception as exc:  # pragma: no cover - environment dependent
             self._log(f"Calibration failed: {exc}")
             if self.overlay:
-                self.overlay.set_status("Calibration failed: see logs")
+                self.overlay.set_status_safe("Calibration failed: see logs")
             return False
 
     def _ensure_calibration_ui(self) -> None:
@@ -1072,14 +1122,14 @@ class HotkeyManager(threading.Thread):
             return None
         return inv_key, tek_key
 
-    def _finalize_calibration(self, inv_key: str, tek_key: str, tmpl_path: Path) -> None:
-        # Save template path and mark calibration complete
-        self.config_manager.config["DEFAULT"]["search_bar_template"] = str(tmpl_path)
+    def _finalize_calibration(self, inv_key: str, tek_key: str) -> None:
+        # Mark calibration complete - coordinates are captured separately via F7 dropdown
         self.config_manager.config["DEFAULT"]["calibration_complete"] = "True"
         self.config_manager.save()
         if self.overlay:
-            self.overlay.set_status(
-                f"Calibration saved: Inventory={inv_key}, TekCancel={tek_key}\nTemplate={tmpl_path}"
+            self.overlay.set_status_safe(
+                f"Calibration saved: Inventory={inv_key}, TekCancel={tek_key}\n"
+                f"Use F7 with 'Inv Search' to capture search bar coordinates."
             )
 
     # --------------------------- Keyboard capture helpers ----------------------------
@@ -1201,7 +1251,7 @@ class HotkeyManager(threading.Thread):
         from ..features.combat.armor_equipment import ArmorEquipmentService
         from ..features.combat.search_service import SearchService
         search_service = SearchService(self.config_manager, self.overlay)
-        armor_service = ArmorEquipmentService(self.config_manager, self.input_controller, search_service)
+        armor_service = ArmorEquipmentService(self.config_manager, self.input_controller, search_service, self.overlay)
         return armor_service.create_flak_fullset_task()
 
     def _task_equip_tek_fullset(self) -> Callable[[object, object], None]:
@@ -1209,7 +1259,7 @@ class HotkeyManager(threading.Thread):
         from ..features.combat.armor_equipment import ArmorEquipmentService
         from ..features.combat.search_service import SearchService
         search_service = SearchService(self.config_manager, self.overlay)
-        armor_service = ArmorEquipmentService(self.config_manager, self.input_controller, search_service)
+        armor_service = ArmorEquipmentService(self.config_manager, self.input_controller, search_service, self.overlay)
         return armor_service.create_tek_fullset_task()
 
     def _task_equip_mixed_fullset(self) -> Callable[[object, object], None]:
@@ -1217,7 +1267,7 @@ class HotkeyManager(threading.Thread):
         from ..features.combat.armor_equipment import ArmorEquipmentService
         from ..features.combat.search_service import SearchService
         search_service = SearchService(self.config_manager, self.overlay)
-        armor_service = ArmorEquipmentService(self.config_manager, self.input_controller, search_service)
+        armor_service = ArmorEquipmentService(self.config_manager, self.input_controller, search_service, self.overlay)
         return armor_service.create_mixed_fullset_task()
 
     def _complete_and_exit_calibration(self) -> None:
@@ -1254,12 +1304,6 @@ class HotkeyManager(threading.Thread):
         calibration_service = CalibrationService(self.config_manager, self.overlay, self._calibration_gate)
         calibration_service.capture_key(key_name, prompt, is_tek, self._prompt_until_valid)
 
-    def _ui_capture_template(self) -> None:
-        """Capture search bar template."""
-        from ..features.debug.calibration_service import CalibrationService
-        calibration_service = CalibrationService(self.config_manager, self.overlay, self._calibration_gate)
-        calibration_service.capture_template()
-
     def _log(self, msg: str) -> None:
         """Log message to overlay UI if available, otherwise print to console."""
         from ..features.debug.calibration_service import CalibrationService
@@ -1272,3 +1316,153 @@ class HotkeyManager(threading.Thread):
         from ..features.debug.calibration_service import CalibrationService
         calibration_service = CalibrationService(self.config_manager, self.overlay, self._calibration_gate)
         calibration_service.prepare_recalibration_ui()
+
+    def _handle_coordinate_capture(self, element_info: str) -> None:
+        """Handle coordinate capture from the overlay dropdown."""
+        try:
+            # element_info format: "debug:element_name" or "save:element_name"
+            if ":" not in element_info:
+                return
+
+            mode, element_name = element_info.split(":", 1)
+
+            # Get current cursor position
+            try:
+                x, y = _cursor_pos()
+            except Exception:
+                return
+
+            logger = logging.getLogger(__name__)
+
+            if mode == "debug":
+                # DEBUG mode: only log coordinates
+                logger.info(f"DEBUG coordinate capture: {element_name} at ({x}, {y})")
+                if self.overlay:
+                    self.overlay.set_status(f"DEBUG: {element_name} coordinates logged: ({x}, {y})")
+            elif mode == "save":
+                # Save mode: save coordinates to INI and log
+                config_key = f"coord_{element_name.lower().replace(' ', '_')}"
+
+                # Special handling for "Inv Search" - this replaces F8 functionality
+                if element_name == "Inv Search":
+                    # Save search bar coordinates and clear the old template
+                    self.config_manager.config["DEFAULT"]["search_bar_coords"] = f"{x},{y}"
+                    # Clear the old template path since we're using coordinates now
+                    if "search_bar_template" in self.config_manager.config["DEFAULT"]:
+                        del self.config_manager.config["DEFAULT"]["search_bar_template"]
+                    logger.info(f"Inventory search bar coordinates saved: ({x}, {y})")
+                    if self.overlay:
+                        self.overlay.set_status(f"Inv Search coordinates saved: ({x}, {y}) - replaces F8 template")
+                else:
+                    # Save other coordinates normally
+                    self.config_manager.config["DEFAULT"][config_key] = f"{x},{y}"
+                    logger.info(f"Coordinate saved: {element_name} = ({x}, {y}) -> {config_key}")
+                    if self.overlay:
+                        self.overlay.set_status(f"Coordinate saved: {element_name} at ({x}, {y})")
+
+                # Save config
+                self.config_manager.save()
+
+        except Exception as e:
+            logger = logging.getLogger(__name__)
+            logger.error(f"Error handling coordinate capture: {e}")
+            if self.overlay:
+                self.overlay.set_status(f"Error capturing coordinates: {e}")
+
+    def _handle_roi_capture(self, roi_info: str) -> None:
+        """Handle ROI capture from the overlay dropdown."""
+        try:
+            # roi_info format: "debug:roi_type" or "save:roi_type"
+            if ":" not in roi_info:
+                return
+
+            mode, roi_type = roi_info.split(":", 1)
+            logger = logging.getLogger(__name__)
+
+            if mode == "debug":
+                # DEBUG mode: take screenshot and log data without saving to INI
+                self._debug_roi_capture(roi_type, logger)
+            elif mode == "save":
+                # Save mode: use original F6 two-press capture and save to INI
+                self._save_roi_capture(roi_type, logger)
+
+        except Exception as e:
+            logger = logging.getLogger(__name__)
+            logger.error(f"Error handling ROI capture: {e}")
+            if self.overlay:
+                self.overlay.set_status(f"Error capturing ROI: {e}")
+
+    def _debug_roi_capture(self, roi_type: str, logger) -> None:
+        """DEBUG ROI capture: take screenshot and log coordinates without saving."""
+        try:
+            if user32 is None:
+                if self.overlay:
+                    self.overlay.set_status("DEBUG ROI: Windows API not available")
+                return
+
+            # Get current cursor position for reference
+            try:
+                x, y = _cursor_pos()
+            except Exception:
+                x, y = 0, 0
+
+            # Get monitor bounds
+            monitor_bounds = w32.current_monitor_bounds()
+
+            # Take a screenshot of a small area around cursor for debugging
+            debug_size = 200  # 200x200 pixel area
+            left = max(monitor_bounds["left"], x - debug_size // 2)
+            top = max(monitor_bounds["top"], y - debug_size // 2)
+            width = min(debug_size, monitor_bounds["width"] - (left - monitor_bounds["left"]))
+            height = min(debug_size, monitor_bounds["height"] - (top - monitor_bounds["top"]))
+
+            # Save debug screenshot
+            try:
+                with mss.mss() as sct:
+                    region = {"left": int(left), "top": int(top), "width": int(width), "height": int(height)}
+                    grabbed = sct.grab(region)
+                    bgr = np.array(grabbed)[:, :, :3]  # drop alpha
+
+                # Save to user's config directory for debugging
+                base_dir = self.config_manager.config_path.parent
+                debug_dir = base_dir / "debug_screenshots"
+                debug_dir.mkdir(parents=True, exist_ok=True)
+
+                import time
+                timestamp = int(time.time())
+                debug_path = debug_dir / f"roi_debug_{roi_type.lower().replace(' ', '_')}_{timestamp}.png"
+
+                import cv2
+                cv2.imwrite(str(debug_path), bgr)
+
+                # Log the debug information
+                logger.info(f"DEBUG ROI {roi_type}: cursor at ({x}, {y}), monitor bounds: {monitor_bounds}")
+                logger.info(f"DEBUG ROI screenshot saved: {debug_path}")
+
+                if self.overlay:
+                    self.overlay.set_status(f"DEBUG {roi_type}: logged cursor ({x}, {y}) and saved screenshot")
+
+            except Exception as e:
+                logger.error(f"Failed to save debug screenshot: {e}")
+                if self.overlay:
+                    self.overlay.set_status(f"DEBUG {roi_type}: logged cursor ({x}, {y}) - screenshot failed")
+
+        except Exception as e:
+            logger.error(f"Debug ROI capture failed: {e}")
+            if self.overlay:
+                self.overlay.set_status(f"DEBUG ROI capture failed: {e}")
+
+    def _save_roi_capture(self, roi_type: str, logger) -> None:
+        """Save ROI capture: use original two-press system and save to INI."""
+        try:
+            if self.overlay:
+                self.overlay.set_status(f"ROI Capture ({roi_type}): move to top-left and press F6, "
+                                      f"then bottom-right and press F6.")
+
+            # Use the original F6 capture system
+            self._original_f6_capture()
+
+        except Exception as e:
+            logger.error(f"Save ROI capture failed: {e}")
+            if self.overlay:
+                self.overlay.set_status(f"ROI capture failed: {e}")

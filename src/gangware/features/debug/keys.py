@@ -21,7 +21,7 @@ class OverlayProtocol(Protocol):
 user32 = w32.user32
 
 # Ignored keys during calibration input (debounced)
-_IGNORED = {"F1", "F7", "F8"}
+_IGNORED = {"F1", "F7"}
 
 
 def vk_name(vk: int) -> str:
@@ -84,7 +84,7 @@ def process_pressed_vk(vk: int) -> Optional[str]:
     Returns:
       - 'mouse_x...' or 'key_X' for a valid input
       - '__restart__' when Esc was pressed
-      - '__debounce__' for ignored inputs (F1/F7/F8)
+      - '__debounce__' for ignored inputs (F1/F7)
     """
     name = vk_name(vk)
     # Ignored calibration control keys (debounced)

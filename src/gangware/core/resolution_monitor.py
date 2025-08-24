@@ -91,7 +91,7 @@ class ResolutionMonitor(threading.Thread):
                             f"Resolution updated: Desktop={desktop_res}, "
                             f"Game={game_res}, Mode={window_mode}"
                         )
-                        self.overlay.set_status(status_msg)
+                        self.overlay.set_status_safe(status_msg)
                 except Exception as e:
                     logger.warning("Failed to save resolution config: %s", e)
 
@@ -185,7 +185,7 @@ class ResolutionMonitor(threading.Thread):
             logger.warning("Unsupported window mode detected: %s", window_mode)
 
             if self.overlay:
-                self.overlay.set_status(warning_msg)
+                self.overlay.set_status_safe(warning_msg)
 
             # Set flag to avoid repeated warnings
             self._warned_about_mode = True
@@ -193,7 +193,7 @@ class ResolutionMonitor(threading.Thread):
             # Window mode is now supported, clear warning flag and notify
             self._warned_about_mode = False
             if self.overlay:
-                self.overlay.set_status(f"✅ Window mode compatible: {window_mode}")
+                self.overlay.set_status_safe(f"✅ Window mode compatible: {window_mode}")
 
     def get_current_info(self) -> Dict[str, str]:
         """Get current resolution and window mode information."""

@@ -10,7 +10,8 @@ def test_config_defaults_and_save(tmp_path, monkeypatch):
     cfg = ConfigManager(str(cfg_path))
     # Defaults present
     assert cfg.get("log_level") == "INFO"
-    assert cfg.get("resolution") == "1920x1080"
+    # Resolution should not have a default - it's detected dynamically
+    assert cfg.get("resolution") is None  # No default resolution
     assert cfg.get("ui_theme") == "dark"
     # Modify and save
     cfg.config["DEFAULT"]["log_level"] = "DEBUG"

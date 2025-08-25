@@ -49,7 +49,6 @@ class ConfigManager:
         defaults = {
             "log_level": "INFO",
             "dry_run": "False",
-            "resolution": "1920x1080",
             "ui_theme": "dark",
             "calibration_complete": "False",
             "inventory_key": "",
@@ -60,6 +59,10 @@ class ConfigManager:
             "tek_punch_post_rmb_settle_ms": "180",
             "search_bar_template": "",
             "ui_demo": "False",
+            # Multiple ROI support
+            "vision_roi": "",  # Legacy/default ROI
+            "search_bar_roi": "",  # ROI for search bar detection
+            "inventory_items_roi": "",  # ROI for inventory item detection
         }
 
         for key, value in defaults.items():

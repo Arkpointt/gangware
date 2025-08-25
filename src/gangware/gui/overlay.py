@@ -383,7 +383,8 @@ class OverlayWindow(QMainWindow):
         self._roi_dropdown.setObjectName("dropdown")
         self._roi_dropdown.addItems([
             "DEBUG",
-            "Inventory ROI"
+            "Search Bar ROI",
+            "Inventory Items ROI"
         ])
         self._roi_dropdown.setMinimumWidth(spx(140))
         self._roi_dropdown.setFocusPolicy(Qt.FocusPolicy.StrongFocus)

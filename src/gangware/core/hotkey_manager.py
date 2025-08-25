@@ -94,6 +94,8 @@ class HotkeyManager(threading.Thread):
         self._has_reg_f7 = False
         # Manual ROI capture state (first corner from F6 or None)
         self._roi_first_corner: Optional[Tuple[int, int]] = None
+        # Current ROI type being captured (for dropdown selection)
+        self._current_roi_type: Optional[str] = None
         # Try to start a global hotkey message loop for robust handling
         self._start_hotkey_hook()
         # Lazy-initialized armor matcher
@@ -547,18 +549,26 @@ class HotkeyManager(threading.Thread):
         """Enhanced ROI capture (F6) with dropdown selection support.
 
         Now supports different capture modes based on overlay dropdown selection:
-        - DEBUG: Only logs and screenshots, doesn't save to INI
-        - Other modes: Save to INI as before
+        - DEBUG: Two-corner capture that only logs, doesn't save to INI
+        - Other modes: Two-corner capture that saves to INI
         """
-        # Check if overlay has the new enhanced ROI dropdown
-        if self.overlay and hasattr(self.overlay, 'trigger_roi_capture'):
-            try:
-                self.overlay.trigger_roi_capture()
-                return
-            except Exception:
-                pass
+        # Check if overlay has ROI dropdown and get selected type
+        roi_type = None
+        if self.overlay and hasattr(self.overlay, '_roi_dropdown') and self.overlay._roi_dropdown:
+            roi_type = self.overlay._roi_dropdown.currentText()
 
-        # Fallback to original two-press ROI capture
+        # If a ROI type is selected, set it up for two-corner capture
+        if roi_type and roi_type != "":
+            # Set the ROI type for the capture sequence
+            self._current_roi_type = roi_type
+
+            # Show initial instruction if this is the start of capture
+            if self._roi_first_corner is None:
+                if self.overlay:
+                    self.overlay.set_status(f"ROI Capture ({roi_type}): move to first corner and press F6, "
+                                          f"then move to second corner and press F6 again.")
+
+        # Always use the original two-corner capture method
         self._original_f6_capture()
 
     def _original_f6_capture(self) -> None:
@@ -574,12 +584,18 @@ class HotkeyManager(threading.Thread):
             self._roi_first_corner = (x, y)
             if self.overlay:
                 try:
-                    self.overlay.set_status_safe("ROI: first corner saved. Move to bottom-right and press F6 again.")
+                    roi_type_label = self._current_roi_type if self._current_roi_type else "Main"
+                    self.overlay.set_status_safe(
+                        f"{roi_type_label} ROI: first corner saved. Move to bottom-right and press F6 again."
+                    )
                     if hasattr(self.overlay, "set_roi_status"):
                         # Mark as pending while capturing
                         self.overlay.set_roi_status(False)
                 except Exception:
                     pass
+            # Log first corner coordinates in DEBUG mode
+            if self._current_roi_type == "DEBUG":
+                logging.getLogger(__name__).info("DEBUG ROI: First corner at (%d, %d)", x, y)
             return
         # Second press
         x1, y1 = self._roi_first_corner
@@ -605,7 +621,6 @@ class HotkeyManager(threading.Thread):
 
         # Create absolute ROI string for current session
         abs_roi_str = f"{int(left)},{int(top)},{int(width)},{int(height)}"
-        os.environ["GW_VISION_ROI"] = abs_roi_str
 
         # Convert to relative coordinates for storage
         rel_left = (left - monitor_bounds["left"]) / monitor_bounds["width"]
@@ -614,94 +629,109 @@ class HotkeyManager(threading.Thread):
         rel_height = height / monitor_bounds["height"]
         rel_roi_str = f"{rel_left:.4f},{rel_top:.4f},{rel_width:.4f},{rel_height:.4f}"
 
-        # Save to config
-        self.config_manager.config["DEFAULT"]["vision_roi"] = rel_roi_str
-        self.config_manager.save()
-        logging.getLogger(__name__).info("F6: saved relative ROI: %s (absolute: %s)", rel_roi_str, abs_roi_str)
+        # Save to config based on ROI type
+        if self._current_roi_type == "DEBUG":
+            # DEBUG mode: only log coordinates, don't save to config or set environment
+            logging.getLogger(__name__).info("DEBUG ROI capture: %dx%d at (%d,%d)",
+                                             int(width), int(height), int(left), int(top))
+            logging.getLogger(__name__).info("DEBUG ROI corners: (%d,%d) to (%d,%d)",
+                                             x1, y1, x, y)
+            # Don't save to config file or environment for DEBUG mode
+        else:
+            # Determine config key based on ROI type
+            config_key = self._get_config_key_for_roi_type(self._current_roi_type)
 
-        # Save a snapshot image of the selected ROI for user confirmation
-        snapshot_path_str = None
-        try:
-            with mss.mss() as sct:
-                region = {"left": int(left), "top": int(top), "width": int(width), "height": int(height)}
-                grabbed = sct.grab(region)
-                bgr = np.array(grabbed)[:, :, :3]  # drop alpha
-            base_dir = self.config_manager.config_path.parent
-            out_dir = base_dir / "templates"
-            out_dir.mkdir(parents=True, exist_ok=True)
-            out_path = out_dir / "roi.png"
-            try:
-                import cv2  # ensure available in this scope
-                cv2.imwrite(str(out_path), bgr)
-                snapshot_path_str = str(out_path)
-            except Exception:
-                snapshot_path_str = None
-        except Exception:
-            snapshot_path_str = None
-
-        if self.overlay:
-            try:
-                if snapshot_path_str:
-                    self.overlay.set_status(
-                        f"ROI set to {width}x{height} at ({left},{top}) [Relative: {rel_roi_str[:20]}...]. "
-                        f"Saved snapshot: {snapshot_path_str}. F6 twice to change."
-                    )
-                else:
-                    self.overlay.set_status(
-                        f"ROI set to {width}x{height} at ({left},{top}) [Relative]. "
-                        f"(Snapshot save failed.) F6 twice to change."
-                    )
-                if hasattr(self.overlay, "set_roi_status"):
-                    # Show absolute coordinates in overlay for user reference
-                    self.overlay.set_roi_status(True, abs_roi_str)
-            except Exception:
-                self.overlay.set_status("ROI capture: move to top-left and press F6, then bottom-right and press F6.")
-        rel_roi_str = w32.absolute_to_relative_roi(abs_roi_str, monitor_bounds)
-
-        # Persist relative coordinates in config
-        try:
-            self.config_manager.config["DEFAULT"]["vision_roi"] = rel_roi_str
+            # Save to specific config key
+            self.config_manager.config["DEFAULT"][config_key] = rel_roi_str
             self.config_manager.save()
-            logging.getLogger(__name__).info("F6: saved relative ROI: %s (absolute: %s)", rel_roi_str, abs_roi_str)
-        except Exception:
-            pass
 
-        # Save a snapshot image of the selected ROI for user confirmation
+            # Set environment variable for compatibility (uses last captured ROI)
+            os.environ["GW_VISION_ROI"] = abs_roi_str
+
+            logging.getLogger(__name__).info("F6: saved %s ROI: %s (absolute: %s)",
+                                           self._current_roi_type or "default", rel_roi_str, abs_roi_str)
+
+        # Always save a snapshot image of the selected ROI for review
         snapshot_path_str = None
         try:
             with mss.mss() as sct:
                 region = {"left": int(left), "top": int(top), "width": int(width), "height": int(height)}
                 grabbed = sct.grab(region)
                 bgr = np.array(grabbed)[:, :, :3]  # drop alpha
-            base_dir = self.config_manager.config_path.parent
-            out_dir = base_dir / "templates"
-            out_dir.mkdir(parents=True, exist_ok=True)
-            out_path = out_dir / "roi.png"
+
+            # Determine save location based on mode
+            if self._current_roi_type == "DEBUG":
+                # For DEBUG mode, save to current session's log directory
+                import time
+                timestamp = time.strftime("%Y%m%d_%H%M%S")
+
+                # Try to use session directory if available
+                session_dir = os.environ.get("GW_LOG_SESSION_DIR", "")
+                if session_dir and os.path.exists(session_dir):
+                    # Save to session's artifacts subdirectory
+                    from pathlib import Path
+                    out_dir = Path(session_dir) / "artifacts"
+                    out_dir.mkdir(parents=True, exist_ok=True)
+                    out_path = out_dir / f"roi_debug_{timestamp}.png"
+                else:
+                    # Fallback to logs directory if no session
+                    base_dir = self.config_manager.config_path.parent
+                    out_dir = base_dir / "logs"
+                    out_dir.mkdir(parents=True, exist_ok=True)
+                    out_path = out_dir / f"roi_debug_{timestamp}.png"
+            else:
+                # For normal mode, save to templates directory
+                base_dir = self.config_manager.config_path.parent
+                out_dir = base_dir / "templates"
+                out_dir.mkdir(parents=True, exist_ok=True)
+                out_path = out_dir / "roi.png"
+
             try:
                 import cv2  # ensure available in this scope
                 cv2.imwrite(str(out_path), bgr)
                 snapshot_path_str = str(out_path)
-            except Exception:
+                logging.getLogger(__name__).info("ROI screenshot saved to: %s", snapshot_path_str)
+            except Exception as e:
+                logging.getLogger(__name__).error("Failed to save ROI screenshot: %s", e)
                 snapshot_path_str = None
-        except Exception:
+        except Exception as e:
+            logging.getLogger(__name__).error("Failed to capture ROI screenshot: %s", e)
             snapshot_path_str = None
+
         if self.overlay:
             try:
-                if snapshot_path_str:
-                    self.overlay.set_status(
-                        f"ROI set to {width}x{height} at ({left},{top}) [Relative: {rel_roi_str[:20]}...]. "
-                        f"Saved snapshot: {snapshot_path_str}. F6 twice to change."
-                    )
+                roi_type_display = self._current_roi_type or "Default ROI"
+
+                if self._current_roi_type == "DEBUG":
+                    if snapshot_path_str:
+                        self.overlay.set_status(
+                            f"DEBUG ROI: {width}x{height} at ({left},{top}). "
+                            f"Screenshot saved: {snapshot_path_str}"
+                        )
+                    else:
+                        self.overlay.set_status(
+                            f"DEBUG ROI: {width}x{height} at ({left},{top}). "
+                            f"Coordinates logged (screenshot failed)."
+                        )
                 else:
-                    self.overlay.set_status(
-                        f"ROI set to {width}x{height} at ({left},{top}) [Relative]. "
-                        f"(Snapshot save failed.) F6 twice to change."
-                    )
-                if hasattr(self.overlay, "set_roi_status"):
-                    # Show absolute coordinates in overlay for user reference
-                    self.overlay.set_roi_status(True, abs_roi_str)
+                    if snapshot_path_str:
+                        self.overlay.set_status(
+                            f"{roi_type_display} captured: {width}x{height} at ({left},{top}). "
+                            f"Saved to config. Snapshot: {snapshot_path_str}"
+                        )
+                    else:
+                        self.overlay.set_status(
+                            f"{roi_type_display} captured: {width}x{height} at ({left},{top}). "
+                            f"Saved to config (snapshot failed)."
+                        )
+                    if hasattr(self.overlay, "set_roi_status"):
+                        # Show absolute coordinates in overlay for user reference
+                        self.overlay.set_roi_status(True, abs_roi_str)
             except Exception:
                 pass
+
+        # Reset ROI type after capture is complete
+        self._current_roi_type = None
 
     def _tip_roi_capture(self) -> None:
         if self.overlay and hasattr(self.overlay, "set_status"):
@@ -1452,15 +1482,29 @@ class HotkeyManager(threading.Thread):
             if self.overlay:
                 self.overlay.set_status(f"DEBUG ROI capture failed: {e}")
 
+    def _get_config_key_for_roi_type(self, roi_type: Optional[str]) -> str:
+        """Map ROI type to config key."""
+        roi_type_mapping = {
+            "Search Bar ROI": "search_bar_roi",
+            "Inventory Items ROI": "inventory_items_roi",
+            # Legacy compatibility
+            "Inventory ROI": "vision_roi",
+            None: "vision_roi"  # Default fallback
+        }
+        return roi_type_mapping.get(roi_type, "vision_roi")
+
     def _save_roi_capture(self, roi_type: str, logger) -> None:
         """Save ROI capture: use original two-press system and save to INI."""
         try:
-            if self.overlay:
-                self.overlay.set_status(f"ROI Capture ({roi_type}): move to top-left and press F6, "
-                                      f"then bottom-right and press F6.")
+            # Store the ROI type for the capture sequence
+            self._current_roi_type = roi_type
 
-            # Use the original F6 capture system
-            self._original_f6_capture()
+            if self.overlay:
+                self.overlay.set_status(f"ROI Capture ({roi_type}): move to first corner and press F6, "
+                                      f"then move to second corner and press F6 again.")
+
+            # Reset the capture state to start fresh
+            self._roi_first_corner = None
 
         except Exception as e:
             logger.error(f"Save ROI capture failed: {e}")

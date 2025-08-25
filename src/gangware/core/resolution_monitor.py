@@ -55,26 +55,32 @@ class ResolutionMonitor(threading.Thread):
             desktop_res = self._get_desktop_resolution()
             game_res, window_mode = self._get_game_window_info()
 
-            # Check for changes
+            # Check for changes (only report if this is the first detection OR values actually changed)
             changed = False
+            is_first_detection = (not self._last_desktop_resolution and
+                                 not self._last_game_resolution and
+                                 not self._last_window_mode)
 
             if desktop_res != self._last_desktop_resolution:
                 self._last_desktop_resolution = desktop_res
                 self.config_manager.config["DEFAULT"]["desktop_resolution"] = desktop_res
                 changed = True
-                logger.info("Desktop resolution changed: %s", desktop_res)
+                if not is_first_detection:  # Only log if not the initial detection
+                    logger.info("Desktop resolution changed: %s", desktop_res)
 
             if game_res != self._last_game_resolution:
                 self._last_game_resolution = game_res
                 self.config_manager.config["DEFAULT"]["game_resolution"] = game_res
                 changed = True
-                logger.info("Game resolution changed: %s", game_res)
+                if not is_first_detection:  # Only log if not the initial detection
+                    logger.info("Game resolution changed: %s", game_res)
 
             if window_mode != self._last_window_mode:
                 self._last_window_mode = window_mode
                 self.config_manager.config["DEFAULT"]["window_mode"] = window_mode
                 changed = True
-                logger.info("Window mode changed: %s", window_mode)
+                if not is_first_detection:  # Only log if not the initial detection
+                    logger.info("Window mode changed: %s", window_mode)
 
                 # Reset warning flag when window mode changes
                 self._warned_about_mode = False
@@ -86,7 +92,8 @@ class ResolutionMonitor(threading.Thread):
             if changed:
                 try:
                     self.config_manager.save()
-                    if self.overlay:
+                    # Only show overlay message for actual changes, not initial detection
+                    if self.overlay and not is_first_detection:
                         status_msg = (
                             f"Resolution updated: Desktop={desktop_res}, "
                             f"Game={game_res}, Mode={window_mode}"
@@ -99,15 +106,29 @@ class ResolutionMonitor(threading.Thread):
             logger.warning("Resolution detection failed: %s", e)
 
     def _get_desktop_resolution(self) -> str:
-        """Get desktop resolution as 'widthxheight'."""
+        """Get desktop resolution as 'widthxheight' or 'unknown' if detection fails."""
         try:
             from .win32 import utils as w32
             monitor = w32.current_monitor_bounds()
-            width = monitor.get('width', 1920)
-            height = monitor.get('height', 1080)
-            return f"{width}x{height}"
-        except Exception:
-            return "1920x1080"
+
+            # Check if we got valid monitor bounds
+            width = monitor.get('width', 0)
+            height = monitor.get('height', 0)
+
+            if width > 0 and height > 0:
+                return f"{width}x{height}"
+            else:
+                # Resolution detection failed
+                if self.overlay:
+                    self.overlay.set_status_safe("⚠️ Unable to detect display resolution")
+                logger.warning("Failed to detect display resolution - invalid dimensions")
+                return "unknown"
+        except Exception as e:
+            # Resolution detection failed
+            if self.overlay:
+                self.overlay.set_status_safe("⚠️ Unable to detect display resolution")
+            logger.warning("Failed to detect display resolution: %s", e)
+            return "unknown"
 
     def _get_game_window_info(self) -> Tuple[str, str]:
         """Get game window resolution and mode.
@@ -146,10 +167,14 @@ class ResolutionMonitor(threading.Thread):
 
             # Get desktop bounds
             desktop = w32.current_monitor_bounds()
-            desktop_width = desktop.get('width', 1920)
-            desktop_height = desktop.get('height', 1080)
+            desktop_width = desktop.get('width', 0)
+            desktop_height = desktop.get('height', 0)
             desktop_left = desktop.get('left', 0)
             desktop_top = desktop.get('top', 0)
+
+            # If we couldn't detect desktop dimensions, we can't determine window mode
+            if desktop_width == 0 or desktop_height == 0:
+                return "unknown"
 
             # Check if window fills the entire monitor
             is_full_size = (width >= desktop_width and height >= desktop_height)
@@ -208,7 +233,7 @@ class ResolutionMonitor(threading.Thread):
 
     def get_config_resolution(self) -> str:
         """Get the configured resolution from config.ini."""
-        return self.config_manager.get("resolution", fallback="1920x1080")
+        return self.config_manager.get("resolution", fallback="unknown")
 
     def get_detected_resolution(self) -> str:
         """Get the currently detected desktop resolution."""

@@ -133,14 +133,30 @@ def main() -> None:
 
         def _handle_autosim_start():
             try:
-                # Hide overlay immediately
-                overlay.set_visible(False)
                 # Get server number from overlay input
                 server_number = overlay.get_server_number() if hasattr(overlay, "get_server_number") else ""
+
+                # Validate server number is provided and not empty
+                if not server_number.strip():
+                    # Show warning and keep overlay visible
+                    overlay.set_status("WARNING: Please enter a server number before starting AutoSim")
+                    return
+
+                # Validate server number is numeric (basic validation)
+                try:
+                    int(server_number.strip())
+                except ValueError:
+                    overlay.set_status("WARNING: Server number must be a valid number")
+                    return
+
+                # Hide overlay and start autosim
+                overlay.set_visible(False)
+                # Start autosim after 3 seconds
+                QTimer.singleShot(3000, lambda: autosim.start(server_number))
             except Exception:
-                server_number = ""
-            # Start autosim after 3 seconds
-            QTimer.singleShot(3000, lambda: autosim.start(server_number))
+                # If something goes wrong, show error and keep overlay visible
+                overlay.set_status("ERROR: Failed to start AutoSim")
+                return
 
         def _handle_autosim_stop():
             try:

@@ -336,28 +336,29 @@ class OverlayWindow(QMainWindow):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(spx(14))
 
-        # AUTOSIM section with server input and Start button
-        sec = QFrame()
-        sec.setObjectName("section")
-        glow(sec, self.CYAN, 22, 70)
-        v = QVBoxLayout(sec)
-        v.setContentsMargins(spx(12), spx(10), spx(12), spx(10))
-        v.setSpacing(spx(10))
+        # AUTOSIM section - compact within utilities
+        autosim_sec = QFrame()
+        autosim_sec.setObjectName("section")
+        glow(autosim_sec, self.CYAN, 22, 70)
+        autosim_v = QVBoxLayout(autosim_sec)
+        autosim_v.setContentsMargins(spx(12), spx(10), spx(12), spx(10))
+        autosim_v.setSpacing(spx(8))
 
-        t = QLabel("AUTOSIM")
-        t.setObjectName("sectionTitle")
-        glow(t, self.ORANGE, 18, 130)
-        v.addWidget(t)
+        autosim_title = QLabel("AUTOSIM")
+        autosim_title.setObjectName("sectionTitle")
+        glow(autosim_title, self.ORANGE, 18, 130)
+        autosim_v.addWidget(autosim_title)
 
-        # Server number input row
-        server_row = QWidget()
-        server_h = QHBoxLayout(server_row)
-        server_h.setContentsMargins(0, 0, 0, 0)
+        # Combined row for server input and start button
+        control_row = QWidget()
+        control_h = QHBoxLayout(control_row)
+        control_h.setContentsMargins(0, 0, 0, 0)
+        control_h.setSpacing(spx(12))
 
-        server_lbl = QLabel("Server Number (F11):")
+        # Server input section
+        server_lbl = QLabel("Server Number:")
         server_lbl.setObjectName("item")
-        server_h.addWidget(server_lbl)
-        server_h.addStretch(1)
+        control_h.addWidget(server_lbl)
 
         self._server_input = QLineEdit()
         self._server_input.setObjectName("textInput")
@@ -365,30 +366,35 @@ class OverlayWindow(QMainWindow):
         self._server_input.setFixedWidth(spx(80))
         self._server_input.setFixedHeight(spx(30))
         glow(self._server_input, self.CYAN, 12, 50)
-        server_h.addWidget(self._server_input)
+        control_h.addWidget(self._server_input)
 
-        v.addWidget(server_row)
+        # Add some spacing
+        control_h.addSpacing(spx(16))
 
-        # Start button row
-        row = QWidget()
-        h = QHBoxLayout(row)
-        h.setContentsMargins(0, 0, 0, 0)
-
-        name_lbl = QLabel("Start Autosim (menu automation)")
-        name_lbl.setObjectName("item")
-        h.addWidget(name_lbl)
-        h.addStretch(1)
-
-        btn = QPushButton("Start")
+        # Start button
+        btn = QPushButton("Start (F11)")
         btn.setObjectName("smallBtn")
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
         btn.setFixedHeight(spx(36))
         glow(btn, self.CYAN, 20, 100)
         btn.clicked.connect(lambda: self.signals.autosim_start.emit())
-        h.addWidget(btn)
+        control_h.addWidget(btn)
 
-        v.addWidget(row)
-        outer.addWidget(sec)
+        control_h.addStretch(1)  # Push everything to the left
+
+        autosim_v.addWidget(control_row)
+
+        # Description row
+        desc_lbl = QLabel("Menu automation for server joining")
+        desc_lbl.setObjectName("item")
+        desc_lbl.setStyleSheet("color: #888; font-size: 11px;")
+        autosim_v.addWidget(desc_lbl)
+
+        outer.addWidget(autosim_sec)
+
+        # Placeholder for other utility features
+        outer.addStretch(1)  # Push AutoSim to top, leave space below for future features
+
         return page
 
     def _page_calibration(self) -> QWidget:

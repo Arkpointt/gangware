@@ -206,7 +206,6 @@ class AutoSimWorkflow:
         """
         self._logger.info("AutoSim: Monitoring join result...")
         start_time = time.time()
-        failure_detected = False
         consecutive_no_menu_time = 0.0  # Track continuous time without menu detection
 
         while time.time() - start_time < 15.0:  # Monitor for up to 15 seconds
@@ -215,16 +214,22 @@ class AutoSimWorkflow:
             # Check for Connection_Failed popup
             if self._detect_connection_failed():
                 self._logger.info("AutoSim: Connection_Failed popup detected - handling failure state")
-                if self._handle_connection_failed(server_number, retry_count):
-                    return True  # Successfully handled and restarted
-                else:
-                    return False  # Failed to handle or max retries reached
+                # Handle the popup but don't immediately retry - respect retry limits
+                if self._handle_connection_failed_popup():
+                    # Popup handled, now check retry count and navigate back if needed
+                    if retry_count >= self.max_retries:
+                        self._logger.warning("AutoSim: Max retries reached (%d), giving up", self.max_retries)
+                        self._update_status("Max retries reached - unable to join server")
+                        return False
 
-            # Check for failure states (other potential failure templates can be added here)
-            # if self._detect_other_failure_states():
-            #     self._logger.info("AutoSim: Other failure state detected")
-            #     failure_detected = True
-            #     break
+                    # Navigate back and retry
+                    self._logger.info("AutoSim: Going back to retry (%d/%d)", retry_count + 1, self.max_retries)
+                    if self._navigate_back_to_select_game(server_number, retry_count + 1):
+                        return self._from_select_game(server_number, retry_count + 1)
+                    else:
+                        return False
+                else:
+                    return False  # Failed to handle popup
 
             # Check if we're still detecting menus (indicates join didn't work)
             if self._detect_any_menu():
@@ -252,25 +257,20 @@ class AutoSimWorkflow:
 
             time.sleep(0.25)  # Check every 250ms for faster failure detection
 
-        # If we reach here, either failure detected or 15 seconds elapsed
-        if failure_detected:
-            self._logger.info("AutoSim: Join failed due to failure state")
-        else:
-            self._logger.info("AutoSim: Join failed - still detecting menus after 15 seconds")
+        # 15 seconds elapsed without success or Connection_Failed popup
+        self._logger.info("AutoSim: Join timeout - no success or failure detected after 15 seconds")
 
-        # Go back and retry if under max attempts
-        if retry_count < self.max_retries:
-            self._logger.info("AutoSim: Going back to retry (%d/%d)",
-                             retry_count + 1, self.max_retries)
-            if not self._click_coordinate("coord_back"):
-                return False
-
-            time.sleep(1.0)
-            # Should be back on Select Game menu, retry from there
-            return self._from_select_game(server_number, retry_count + 1)
-        else:
+        # Check retry count before going back
+        if retry_count >= self.max_retries:
             self._logger.warning("AutoSim: Max retries reached (%d), giving up", self.max_retries)
             self._update_status("Max retries reached - unable to join server")
+            return False
+
+        # Navigate back and retry
+        self._logger.info("AutoSim: Going back to retry (%d/%d)", retry_count + 1, self.max_retries)
+        if self._navigate_back_to_select_game(server_number, retry_count + 1):
+            return self._from_select_game(server_number, retry_count + 1)
+        else:
             return False
 
     def _detect_any_menu(self) -> bool:
@@ -339,6 +339,8 @@ class AutoSimWorkflow:
     def _handle_connection_failed(self, server_number: str, retry_count: int) -> bool:
         """Handle Connection_Failed popup by closing it and restarting from detected menu.
 
+        Respects the maximum retry limit and does not increment retry count inappropriately.
+
         Args:
             server_number: Server number to search for
             retry_count: Current retry attempt
@@ -347,6 +349,28 @@ class AutoSimWorkflow:
             True if successfully handled and restarted, False otherwise
         """
         self._logger.info("AutoSim: Handling Connection_Failed popup...")
+
+        # Check if we've exceeded max retries before proceeding
+        if retry_count >= self.max_retries:
+            self._logger.warning(
+                "AutoSim: Max retries (%d) reached while handling connection failure. Aborting.",
+                self.max_retries
+            )
+            return False
+
+        # Close the popup
+        if not self._handle_connection_failed_popup():
+            return False
+
+        # Navigate back to SELECT_GAME menu to retry
+        return self._navigate_back_to_select_game(server_number, retry_count)
+
+    def _handle_connection_failed_popup(self) -> bool:
+        """Close the Connection_Failed popup.
+
+        Returns:
+            True if popup was successfully closed, False otherwise
+        """
         # Try to ensure Ark has focus before pressing Enter
         try:
             from ...core.win32.utils import ensure_ark_foreground  # lazy import
@@ -367,7 +391,18 @@ class AutoSimWorkflow:
 
         # Wait a moment for popup to close
         time.sleep(1.0)
+        return True
 
+    def _navigate_back_to_select_game(self, server_number: str, retry_count: int) -> bool:
+        """Navigate back to SELECT_GAME menu after connection failure.
+
+        Args:
+            server_number: Server number to search for
+            retry_count: Current retry attempt
+
+        Returns:
+            True if successfully navigated and restarted, False otherwise
+        """
         # Prefer watcher-provided menu (with hysteresis), wait briefly for it to stabilize
         detected_menu = self._wait_watcher_menu(timeout=0.9)
         if not detected_menu:
@@ -376,8 +411,8 @@ class AutoSimWorkflow:
 
         if detected_menu:
             self._logger.info("AutoSim: After closing popup, detected menu: %s", detected_menu)
-            # Restart the workflow from the detected menu
-            return self.execute_from_menu(detected_menu, server_number, retry_count + 1)
+            # Restart the workflow from the detected menu with SAME retry count (not incremented)
+            return self.execute_from_menu(detected_menu, server_number, retry_count)
         else:
             self._logger.warning("AutoSim: Could not detect menu after closing Connection_Failed popup")
             # If we can't detect the menu, assume we're back at server browser and click back
@@ -388,7 +423,8 @@ class AutoSimWorkflow:
                 detected_menu = self._detect_current_menu()
                 if detected_menu:
                     self._logger.info("AutoSim: After Back button, detected menu: %s", detected_menu)
-                    return self.execute_from_menu(detected_menu, server_number, retry_count + 1)
+                    # Restart the workflow from the detected menu with SAME retry count (not incremented)
+                    return self.execute_from_menu(detected_menu, server_number, retry_count)
 
             self._logger.error("AutoSim: Failed to recover from Connection_Failed state")
             return False

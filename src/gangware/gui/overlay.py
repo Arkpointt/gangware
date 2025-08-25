@@ -6,7 +6,7 @@ from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QMainWindow, QPushButton, QStackedWidget,
     QGraphicsDropShadowEffect, QFrame, QSizePolicy, QScrollArea,
-    QComboBox
+    QComboBox, QLineEdit
 )
 from PyQt6.QtGui import QColor, QGuiApplication, QFontDatabase, QFont
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject
@@ -147,6 +147,7 @@ def glow(widget, color: str = "#00DDFF", radius: int = 28, opacity: int = 150) -
 class OverlaySignals(QObject):
     recalibrate = pyqtSignal()
     start = pyqtSignal()
+    autosim_start = pyqtSignal()
     capture_inventory = pyqtSignal()
     capture_tek = pyqtSignal()
     capture_template = pyqtSignal()
@@ -248,8 +249,10 @@ class OverlayWindow(QMainWindow):
         tabs.setContentsMargins(0, 0, 0, 0)
         tabs.setSpacing(spx(8))
         self.btn_main_tab = self._nav_button("COMBAT", True)
+        self.btn_utils_tab = self._nav_button("UTILITIES", False)
         self.btn_cal_tab = self._nav_button("DEBUG", False)
         tabs.addWidget(self.btn_main_tab)
+        tabs.addWidget(self.btn_utils_tab)
         tabs.addWidget(self.btn_cal_tab)
         tabs.addStretch(1)
         root.addWidget(tabs_row)
@@ -257,9 +260,11 @@ class OverlayWindow(QMainWindow):
         # Pages
         self.stack = QStackedWidget()
         self.page_main = self._page_main()
+        self.page_utils = self._page_utilities()
         self.page_cal = self._page_calibration()
-        self.stack.addWidget(self.page_main)
-        self.stack.addWidget(self.page_cal)
+        self.stack.addWidget(self.page_main)   # index 0
+        self.stack.addWidget(self.page_utils)  # index 1
+        self.stack.addWidget(self.page_cal)    # index 2
         root.addWidget(self.stack)
 
         # Footer
@@ -271,8 +276,9 @@ class OverlayWindow(QMainWindow):
 
         # Wire tab switching
         self.btn_main_tab.clicked.connect(lambda: self._switch_tab(0))
-        self.btn_cal_tab.clicked.connect(lambda: self._switch_tab(1))
-        self._switch_tab(1 if calibration_mode else 0)
+        self.btn_utils_tab.clicked.connect(lambda: self._switch_tab(1))
+        self.btn_cal_tab.clicked.connect(lambda: self._switch_tab(2))
+        self._switch_tab(2 if calibration_mode else 0)
 
         # Fonts and styles
         self._load_project_fonts()
@@ -288,7 +294,8 @@ class OverlayWindow(QMainWindow):
     def _switch_tab(self, idx: int):
         self.stack.setCurrentIndex(idx)
         self.btn_main_tab.setChecked(idx == 0)
-        self.btn_cal_tab.setChecked(idx == 1)
+        self.btn_utils_tab.setChecked(idx == 1)
+        self.btn_cal_tab.setChecked(idx == 2)
 
     def _page_main(self) -> QWidget:
         page = QWidget()
@@ -320,6 +327,67 @@ class OverlayWindow(QMainWindow):
         ])
         outer.addLayout(grid)
         outer.addWidget(core)
+        return page
+
+    def _page_utilities(self) -> QWidget:
+        page = QWidget()
+        outer = QVBoxLayout(page)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(spx(14))
+
+        # AUTOSIM section with server input and Start button
+        sec = QFrame()
+        sec.setObjectName("section")
+        glow(sec, self.CYAN, 22, 70)
+        v = QVBoxLayout(sec)
+        v.setContentsMargins(spx(12), spx(10), spx(12), spx(10))
+        v.setSpacing(spx(10))
+
+        t = QLabel("AUTOSIM")
+        t.setObjectName("sectionTitle")
+        glow(t, self.ORANGE, 18, 130)
+        v.addWidget(t)
+
+        # Server number input row
+        server_row = QWidget()
+        server_h = QHBoxLayout(server_row)
+        server_h.setContentsMargins(0, 0, 0, 0)
+
+        server_lbl = QLabel("Server Number (F11):")
+        server_lbl.setObjectName("item")
+        server_h.addWidget(server_lbl)
+        server_h.addStretch(1)
+
+        self._server_input = QLineEdit()
+        self._server_input.setObjectName("textInput")
+        self._server_input.setPlaceholderText("e.g. 123")
+        self._server_input.setFixedWidth(spx(80))
+        self._server_input.setFixedHeight(spx(30))
+        glow(self._server_input, self.CYAN, 12, 50)
+        server_h.addWidget(self._server_input)
+
+        v.addWidget(server_row)
+
+        # Start button row
+        row = QWidget()
+        h = QHBoxLayout(row)
+        h.setContentsMargins(0, 0, 0, 0)
+
+        name_lbl = QLabel("Start Autosim (menu automation)")
+        name_lbl.setObjectName("item")
+        h.addWidget(name_lbl)
+        h.addStretch(1)
+
+        btn = QPushButton("Start")
+        btn.setObjectName("smallBtn")
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.setFixedHeight(spx(36))
+        glow(btn, self.CYAN, 20, 100)
+        btn.clicked.connect(lambda: self.signals.autosim_start.emit())
+        h.addWidget(btn)
+
+        v.addWidget(row)
+        outer.addWidget(sec)
         return page
 
     def _page_calibration(self) -> QWidget:
@@ -589,6 +657,16 @@ class OverlayWindow(QMainWindow):
 
     def on_capture_roi_enhanced(self, slot): self.signals.capture_roi_enhanced.connect(slot)
 
+    # Utilities / Autosim
+    def on_autosim_start(self, slot): self.signals.autosim_start.connect(slot)
+    def trigger_autosim_start(self) -> None: self.signals.autosim_start.emit()
+
+    def get_server_number(self) -> str:
+        """Get the server number from the autosim input field."""
+        if hasattr(self, '_server_input'):
+            return self._server_input.text().strip()
+        return ""
+
     def get_selected_coordinate_element(self) -> str:
         """Get the currently selected element from the coordinate dropdown."""
         if self._coordinate_dropdown:
@@ -712,7 +790,7 @@ class OverlayWindow(QMainWindow):
 
     def switch_to_debug(self) -> None:
         self._start_emitted = False
-        self._switch_tab(1)
+        self._switch_tab(2)
         self._update_start_enabled()
 
     # Backward-compatible alias for existing callers

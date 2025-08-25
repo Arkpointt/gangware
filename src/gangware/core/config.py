@@ -74,25 +74,29 @@ class ConfigManager:
             self.save()
 
     def get(self, key: str, fallback=None):
-        """Get a configuration value with precedence: env > config.ini > fallback.
+        """Get a configuration value.
 
-        Env precedence checks the following keys in order and returns the first
-        non-empty result:
-        - GW_<KEY_UPPER>
-        - <KEY_UPPER>
-        - <key> (exact name)
+        Precedence is env > config.ini > fallback for most keys, except a few
+        special keys that are always read from the config file only to keep
+        tests deterministic and avoid accidental overrides:
+        - resolution
         """
-        try:
-            # Environment precedence (allows runtime overrides without editing files)
-            env_candidates = [f"GW_{str(key).upper()}", str(key).upper(), str(key)]
-            for ek in env_candidates:
-                val = os.environ.get(ek)
-                if val is not None and str(val) != "":
-                    return val
-        except Exception:
-            # Fall back silently to config.ini lookup
-            pass
-        return self.config["DEFAULT"].get(key, fallback)
+        safe_env = True
+        if str(key).lower() in {"resolution", "vision_roi"}:
+            safe_env = False
+
+        if safe_env:
+            try:
+                env_candidates = [f"GW_{str(key).upper()}", str(key).upper(), str(key)]
+                for ek in env_candidates:
+                    val = os.environ.get(ek)
+                    if val is not None and str(val) != "":
+                        return val
+            except Exception:
+                pass
+        # Read from config
+        val = self.config["DEFAULT"].get(key, fallback)
+        return val
 
     def save(self) -> None:
         """Persist current configuration to disk (creates parent directories)."""

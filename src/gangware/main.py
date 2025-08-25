@@ -30,6 +30,7 @@ from gangware.vision.controller import VisionController
 from gangware.io.controls import InputController
 from gangware.core.logging_setup import setup_logging
 from gangware.core.health import start_health_monitor
+from gangware.features.autosim import AutoSim
 
 
 
@@ -119,6 +120,27 @@ def main() -> None:
     # Start resolution monitor thread
     resolution_monitor = ResolutionMonitor(config_manager, overlay, interval=10.0)
     resolution_monitor.start()
+
+    # Prepare autosim, start only when user presses Utilities Start or F11
+    from PyQt6.QtCore import QTimer
+    try:
+        autosim = AutoSim(state_manager, config_manager, overlay)
+
+        def _handle_autosim_start():
+            try:
+                # Hide overlay immediately
+                overlay.set_visible(False)
+                # Get server number from overlay input
+                server_number = overlay.get_server_number() if hasattr(overlay, "get_server_number") else ""
+            except Exception:
+                server_number = ""
+            # Start autosim after 3 seconds
+            QTimer.singleShot(3000, lambda: autosim.start(server_number))
+
+        if hasattr(overlay, "on_autosim_start"):
+            overlay.on_autosim_start(_handle_autosim_start)
+    except Exception:
+        pass
 
     # Health monitoring (lightweight, configurable)
     try:

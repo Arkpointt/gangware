@@ -108,6 +108,19 @@ class HotkeyManager(threading.Thread):
                 if ',' in _roi_str and not _roi_str.count('.') >= 3:
                     monitor_bounds = w32.current_monitor_bounds()
                     rel_roi = w32.absolute_to_relative_roi(_roi_str, monitor_bounds)
+                    # Fallback to manual calculation if helper failed
+                    if not rel_roi:
+                        try:
+                            parts = [int(p.strip()) for p in _roi_str.split(",")]
+                            if len(parts) == 4:
+                                ax, ay, aw, ah = parts
+                                rel_left = (ax - monitor_bounds["left"]) / monitor_bounds["width"]
+                                rel_top = (ay - monitor_bounds["top"]) / monitor_bounds["height"]
+                                rel_width = aw / monitor_bounds["width"]
+                                rel_height = ah / monitor_bounds["height"]
+                                rel_roi = f"{rel_left:.4f},{rel_top:.4f},{rel_width:.4f},{rel_height:.4f}"
+                        except Exception:
+                            pass
                     if rel_roi:
                         self.config_manager.config["DEFAULT"]["vision_roi"] = rel_roi
                         try:
@@ -538,8 +551,12 @@ class HotkeyManager(threading.Thread):
             self._recalibrate_event.set()
 
     def _on_hotkey_f11(self) -> None:
-        """F11 hotkey handler - currently disabled."""
-        pass
+        """F11 hotkey handler - trigger autosim start via overlay signal."""
+        try:
+            if self.overlay and hasattr(self.overlay, "trigger_autosim_start"):
+                self.overlay.trigger_autosim_start()
+        except Exception:
+            pass
 
     def _on_hotkey_f9(self) -> None:
         """F9 hotkey handler - currently disabled."""
@@ -619,37 +636,44 @@ class HotkeyManager(threading.Thread):
         left = max(monitor_bounds["left"], min(left, monitor_bounds["left"] + monitor_bounds["width"] - width))
         top = max(monitor_bounds["top"], min(top, monitor_bounds["top"] + monitor_bounds["height"] - height))
 
-        # Create absolute ROI string for current session
+        # Create absolute ROI string for current session (for UI display only)
         abs_roi_str = f"{int(left)},{int(top)},{int(width)},{int(height)}"
 
-        # Convert to relative coordinates for storage
-        rel_left = (left - monitor_bounds["left"]) / monitor_bounds["width"]
-        rel_top = (top - monitor_bounds["top"]) / monitor_bounds["height"]
-        rel_width = width / monitor_bounds["width"]
-        rel_height = height / monitor_bounds["height"]
-        rel_roi_str = f"{rel_left:.4f},{rel_top:.4f},{rel_width:.4f},{rel_height:.4f}"
+        # Compute relative coordinates for storage using centralized helper so tests can patch it
+        rel_roi_str = w32.absolute_to_relative_roi(abs_roi_str, monitor_bounds)
+        # Fallback to deterministic manual calculation if helper failed
+        if not rel_roi_str:
+            try:
+                rel_left = (left - monitor_bounds["left"]) / monitor_bounds["width"]
+                rel_top = (top - monitor_bounds["top"]) / monitor_bounds["height"]
+                rel_width = width / monitor_bounds["width"]
+                rel_height = height / monitor_bounds["height"]
+                rel_roi_str = f"{rel_left:.4f},{rel_top:.4f},{rel_width:.4f},{rel_height:.4f}"
+            except Exception:
+                # Ultimate fallback: if everything fails, don't save anything
+                rel_roi_str = ""
 
-        # Save to config based on ROI type
-        if self._current_roi_type == "DEBUG":
-            # DEBUG mode: only log coordinates, don't save to config or set environment
-            logging.getLogger(__name__).info("DEBUG ROI capture: %dx%d at (%d,%d)",
-                                             int(width), int(height), int(left), int(top))
-            logging.getLogger(__name__).info("DEBUG ROI corners: (%d,%d) to (%d,%d)",
-                                             x1, y1, x, y)
-            # Don't save to config file or environment for DEBUG mode
-        else:
-            # Determine config key based on ROI type
-            config_key = self._get_config_key_for_roi_type(self._current_roi_type)
+        # Only save if we have valid relative coordinates
+        if rel_roi_str and "," in rel_roi_str:
+            # Save to config based on ROI type
+            if self._current_roi_type == "DEBUG":
+                # DEBUG mode: only log coordinates, don't save to config or set environment
+                logging.getLogger(__name__).info(
+                    "DEBUG ROI capture: %dx%d at (%d,%d)", int(width), int(height), int(left), int(top)
+                )
+                logging.getLogger(__name__).info("DEBUG ROI corners: (%d,%d) to (%d,%d)", x1, y1, x, y)
+                # Don't save to config file or environment for DEBUG mode
+            else:
+                # Determine config key based on ROI type
+                config_key = self._get_config_key_for_roi_type(self._current_roi_type)
 
-            # Save to specific config key
-            self.config_manager.config["DEFAULT"][config_key] = rel_roi_str
-            self.config_manager.save()
+                # Save to specific config key
+                self.config_manager.config["DEFAULT"][config_key] = rel_roi_str
+                self.config_manager.save()
 
-            # Set environment variable for compatibility (uses last captured ROI)
-            os.environ["GW_VISION_ROI"] = abs_roi_str
-
-            logging.getLogger(__name__).info("F6: saved %s ROI: %s (absolute: %s)",
-                                           self._current_roi_type or "default", rel_roi_str, abs_roi_str)
+                logging.getLogger(__name__).info(
+                    "F6: saved %s ROI: %s (absolute: %s)", self._current_roi_type or "default", rel_roi_str, abs_roi_str
+                )
 
         # Always save a snapshot image of the selected ROI for review
         snapshot_path_str = None

@@ -55,6 +55,32 @@ from gangware.io import InputController
 from gangware.vision import VisionController
 ```
 
+## AutoSim-specific tests
+
+- Success detection
+	- Mock `_detect_any_menu()` to return False for ≥2 seconds in `_monitor_join_result` and assert success is logged/returned.
+	- Edge case: return False immediately after Join (fast join) to verify the consecutive no-menu logic triggers success.
+
+- Connection_Failed handling
+	- Template detection: Provide a small synthetic frame containing `connection_failed.jpg` region and assert watcher triggers Enter + Back.
+	- Modal detection: Create synthetic frame with centered modal popup and verify Tier 3 heuristic triggers.
+	- Multi-ROI: Set GW_CF_ROIS="0.1,0.1,0.5,0.5;0.5,0.5,0.9,0.9" and verify detection works in both regions.
+	- Gate scanning by setting `autosim_join_window_until = time.time() + 20` in `StateManager` and ensure detection only runs within that window.
+	- Suppression: After Enter pressed, verify `autosim_cf_suppress_until` prevents re-detection for 2.5s.
+	- Bounded navigation: Verify watcher-level Back clicks are limited to max 2 attempts with menu confirmation.
+
+- F11 toggle functionality
+	- Test toggle behavior: start AutoSim (hide overlay) → F11 → stop AutoSim (show overlay)
+	- Verify proper Qt timer cleanup and overlay visibility management.
+
+- Resume functionality
+	- Set `autosim_resume_from = "SELECT_GAME"` and verify loader.tick() resumes automation from that menu.
+
+- Retry path
+	- Simulate missing BattlEye detection and confirm Back navigation and re-entry from Select Game.
+
+Note: Integration/E2E around Ark should be guarded/skipped; prefer mocked frames and dry-run InputController.
+
 GUI/Windows specifics
 - Run GUI-related tests headlessly when possible:
 	```powershell

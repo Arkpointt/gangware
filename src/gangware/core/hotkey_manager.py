@@ -551,10 +551,10 @@ class HotkeyManager(threading.Thread):
             self._recalibrate_event.set()
 
     def _on_hotkey_f11(self) -> None:
-        """F11 hotkey handler - trigger autosim start via overlay signal."""
+        """F11 hotkey handler - toggle autosim start/stop via overlay signal."""
         try:
-            if self.overlay and hasattr(self.overlay, "trigger_autosim_start"):
-                self.overlay.trigger_autosim_start()
+            if self.overlay and hasattr(self.overlay, "toggle_autosim"):
+                self.overlay.toggle_autosim()
         except Exception:
             pass
 

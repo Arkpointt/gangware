@@ -2,11 +2,12 @@ Gangware Engineering Blueprint
 
 Version: 6.5 (Living Document)
 Status: Authoritative Reference
-Last Updated: August 23, 2025
+Last Updated: August 25, 2025
 
 Changelog
 
-2025-08-23: Package-by-Feature refactoring completed. Eliminated controllers/ directory, moved functionality to appropriate packages. Consolidated calibration into features/debug/, moved search into features/combat/. Removed auto_sim feature and cleaned up duplicate files. Updated all import paths and package exports.
+2025-08-25: AutoSim added (menu-aware server join); success detection based on 2s no-menu window; Connection_Failed popup handling via dual detection (template + Tier 3 modal heuristic); post-Join gating with shared state; F11 toggle; multi-ROI support; suppression windows; bounded navigation; resume signaling.
+2025-08-23: Package-by-Feature refactoring completed. Eliminated controllers/ directory, moved functionality to appropriate packages. Consolidated calibration into features/debug/, moved search into features/combat/.
 
 2025-08-22: Removed "patch" terminology and workflows. Adopted changeset model aligned with interactive "review/approve" editing tools. Clarified commenting standards and change scopes.
 
@@ -85,7 +86,8 @@ src/gangware/
 │  │  ├─ keys.py         # Key capture utilities
 │  │  ├─ pixels.py       # Pixel capture utilities
 │  │  └─ template.py     # Template capture utilities
-│  └─ combat/            # Armor equipment, search, tek punch, medbrew
+│  ├─ combat/            # Armor equipment, search, tek punch, medbrew
+│  └─ autosim/           # Menu watcher + automation workflow (server join)
 │     ├─ armor_matcher.py      # Armor detection and matching
 │     ├─ armor_equipment.py    # Armor equipping service
 │     ├─ search_service.py     # Search and inventory automation
@@ -237,7 +239,7 @@ Debug loop ≈ ≤400 ms typical.
 
 Mouse settle ≤ 35 ms.
 
-Join assessment tick 150 ms, timeout 15 s.
+Join assessment: success if 7s of no menu after Join; monitor timeout 15s; watcher popup scan ~250ms cadence in 12s post-Join window.
 
 13. Platform Constraints (Windows)
 
@@ -257,7 +259,38 @@ Bundled: assets/debug/; Overrides: %APPDATA%/Gangware/templates/debug.
 
 Capture: tight crops; recapture after resolution/UI-scale/HDR changes; maintain synonyms for backward compatibility.
 
-Confidence thresholds: documented in code comments + here.
+Confidence thresholds: BattlEye (0.8/0.7/0.6), menus (≥0.6), Connection_Failed template (≥0.82 strong/0.68 soft), Tier 3 modal (≥0.78 strong/0.64 soft); ROI gated, cooldown 2s, suppression 2.5s.
+
+### AutoSim Architecture
+
+**Components:**
+- `loader.py`: Orchestrates watcher + automation; F11 toggle; resume via periodic tick (200ms)
+- `menu_watch.py`: Background thread; dual detection (template + Tier 3 modal); multi-ROI; suppression; bounded navigation
+- `automation.py`: Full workflow; success detection (2s no-menu); retry logic; Back navigation
+
+**Detection Strategy:**
+- Dual-signal: Template matching + template-less modal heuristic (Tier 3)
+- Template: OpenCV TM_CCOEFF_NORMED with hysteresis (strong/soft thresholds)
+- Modal: Edge detection → morphological ops → contour analysis → rectangularity/centrality scoring
+- Multi-ROI: Supports multiple detection regions via GW_CF_ROIS environment variable
+
+**State Management:**
+- `autosim_menu`: Current detected menu with confidence
+- `autosim_join_window_until`: 20s fast scanning window after Join Game click
+- `autosim_cf_suppress_until`: 2.5s suppression after Enter to prevent re-detection
+- `autosim_resume_from`: Signal from watcher to loader for automation resume
+
+**Environment Variables:**
+- `GW_CF_DEBUG=1`: Template detection score logging
+- `GW_MODAL_DEBUG=1`: Modal heuristic score logging
+- `GW_CF_ROIS="x1,y1,x2,y2;x1,y1,x2,y2"`: Multiple ROI regions (fractional coordinates)
+
+**Timing:**
+- Success: 2 seconds consecutive no-menu detection
+- Timeout: 15 seconds maximum join attempt
+- Join Window: 20 seconds fast scanning after Join Game
+- Suppression: 2.5 seconds after Enter pressed
+- Tick Rate: 200ms loader resume polling; ~80-100ms watcher scanning during join window
 
 15. Incident Response & Hotfix Protocol
 

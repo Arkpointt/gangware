@@ -148,6 +148,7 @@ class OverlaySignals(QObject):
     recalibrate = pyqtSignal()
     start = pyqtSignal()
     autosim_start = pyqtSignal()
+    autosim_stop = pyqtSignal()
     capture_inventory = pyqtSignal()
     capture_tek = pyqtSignal()
     capture_template = pyqtSignal()
@@ -659,7 +660,21 @@ class OverlayWindow(QMainWindow):
 
     # Utilities / Autosim
     def on_autosim_start(self, slot): self.signals.autosim_start.connect(slot)
+    def on_autosim_stop(self, slot): self.signals.autosim_stop.connect(slot)
     def trigger_autosim_start(self) -> None: self.signals.autosim_start.emit()
+    def trigger_autosim_stop(self) -> None: self.signals.autosim_stop.emit()
+
+    def toggle_autosim(self) -> None:
+        """Toggle autosim start/stop and show overlay accordingly."""
+        # Check if autosim is currently running by checking if overlay is hidden
+        if not self.isVisible():
+            # Autosim is running, stop it
+            self.trigger_autosim_stop()
+            self.set_visible(True)  # Show overlay
+        else:
+            # Autosim is not running, start it
+            self.trigger_autosim_start()
+            self.set_visible(False)  # Hide overlay
 
     def get_server_number(self) -> str:
         """Get the server number from the autosim input field."""

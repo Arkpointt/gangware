@@ -126,6 +126,11 @@ def main() -> None:
     try:
         autosim = AutoSim(state_manager, config_manager, overlay)
 
+        # Create periodic timer for autosim.tick() to handle resume signals
+        autosim_tick_timer = QTimer()
+        autosim_tick_timer.timeout.connect(autosim.tick)
+        autosim_tick_timer.start(200)  # Check every 200ms for resume signals
+
         def _handle_autosim_start():
             try:
                 # Hide overlay immediately
@@ -137,8 +142,23 @@ def main() -> None:
             # Start autosim after 3 seconds
             QTimer.singleShot(3000, lambda: autosim.start(server_number))
 
+        def _handle_autosim_stop():
+            try:
+                autosim.stop()
+                overlay.set_visible(True)  # Show overlay when autosim stops
+            except Exception:
+                pass
+
         if hasattr(overlay, "on_autosim_start"):
             overlay.on_autosim_start(_handle_autosim_start)
+        if hasattr(overlay, "on_autosim_stop"):
+            overlay.on_autosim_stop(_handle_autosim_stop)
+
+        # Clean up timer on app shutdown
+        def cleanup_autosim():
+            autosim_tick_timer.stop()
+            autosim.stop()
+        app.aboutToQuit.connect(cleanup_autosim)
     except Exception:
         pass
 

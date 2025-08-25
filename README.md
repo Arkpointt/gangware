@@ -1,55 +1,55 @@
 # Gangware
 ## Advanced Computer Vision Automation for ARK: Survival Ascended
 
-**Version 6.2** - Modular, Testable, Session-Logged Automation
+**Version 6.5** — Package-by-Feature, Deterministic, Observable
 
 [![Python](https://img.shields.io/badge/Python-3.11+-blue.svg)](https://python.org)
 [![OpenCV](https://img.shields.io/badge/OpenCV-Computer%20Vision-green.svg)](https://opencv.org)
 [![PyQt6](https://img.shields.io/badge/PyQt6-GUI%20Framework-orange.svg)](https://www.riverbankcomputing.com/software/pyqt/)
 
-Gangware is a high-performance automation system designed specifically for ARK: Survival Ascended, featuring sub-second armor swapping, intelligent computer vision, and advanced macro capabilities. Built with professional-grade optimization techniques, Gangware delivers lightning-fast equipment management and combat automation.
+Gangware is a high-performance automation system designed for ARK: Survival Ascended. It features robust computer vision, package-by-feature architecture, and strict engineering guardrails defined in the Engineering Blueprint (docs/blueprint.md).
 
----
+—
 
 ## 🚀 Key Features
 
-### ⚡ **Sub-Second Armor Swapping**
-- **Performance**: Complete armor swaps in under 1 second
-- **F6 Manual ROI**: Capture custom inventory regions for instant targeting
-- **Smart Bypass**: Eliminates 2+ second calibration delays when F6 ROI available
-- **Multi-Monitor Support**: Intelligent coordinate handling across monitor setups
+### ⚡ Combat & Inventory Automation
+- Sub-second armor swapping (when ROI captured)
+- F6 Manual ROI for fast inventory matching
+- Search-and-type service with robust input handling
+- Multi-monitor aware coordinates and ROI translation
 
-### 🎯 **Advanced Computer Vision**
-- **Hybrid Template Matching**: Edge detection + HSV hue validation for tier confirmation
-- **Template Cropping**: Focus on item icons vs inventory slot backgrounds
-- **Fast/Slow Pass Optimization**: Early exit on good matches for maximum speed
-- **Multi-Scale Robustness**: Handles UI scaling variations automatically
+### 🎯 Vision Pipeline
+- Template matching (OpenCV TM_CCOEFF_NORMED)
+- Inventory ROI calibration and sub-ROI intersection
+- Fast-only search option for latency-sensitive operations
+- Artifact capture on detection failures (for troubleshooting)
 
-### 🔧 **Professional Automation**
-- **Tek Dash Combos**: Frame-perfect movement sequences
-- **Medbrew Management**: Intelligent healing over time with threading
-- **Hotkey System**: Global Windows hotkeys with fallback polling
-- **Real-Time Feedback**: ARK-inspired HUD with status indicators
+### 🧠 AutoSim (Automated Server Join)
+- Dual-signal failure detection (template + modal heuristic)
+- Multi-ROI support via GW_CF_ROIS
+- Success detection: 2 seconds consecutive no-menu
+- Shared state across watcher/automation with gating window
+- F11 global toggle with overlay hide/show
 
-### 🎮 **Gaming-Focused Design**
-- **Zero Game Modification**: External automation, no game files touched
-- **Performance Optimized**: 2ms mouse delays, smart caching, timing instrumentation
-- **Multi-Monitor Ready**: Per-monitor coordinate detection and logging
-- **Professional Logging**: Comprehensive debug output for performance analysis
+### 🧰 Engineering Discipline
+- Package-by-feature layout under src/gangware/
+- Deterministic timing, bounded retries, explicit gates
+- Structured logs with INFO for transitions and DEBUG for details
+- Windows-friendly focus and integrity handling (no injection)
 
----
+—
 
 ## 📋 Quick Start
 
 ### System Requirements
-- **Windows 10/11** (DirectX screen capture)
-- **Python 3.11+**
-- **Multi-monitor compatible**
-- **ARK: Survival Ascended** (any resolution)
+- Windows 10/11
+- Python 3.11+
+- ARK: Survival Ascended (borderless windowed recommended)
 
 ### Installation
 
-1. **Clone and Setup Environment**:
+1. Clone and Setup Environment:
 ```powershell
 git clone <repository-url>
 cd Gangware
@@ -58,195 +58,95 @@ python -m venv .venv
 pip install -r build/requirements.txt
 ```
 
-2. **Launch Application**:
+2. Launch Application:
 ```powershell
 python -m gangware.main
 ```
 
-3. **Initial Calibration**:
-   - Press **F1** to open the overlay
-   - Navigate to **Debug** tab
-   - Follow the setup wizard for keybind and template capture
-   - Use **F6** to capture your custom inventory region for maximum speed
+3. Initial Calibration:
+- Press F1 to open the overlay
+- Go to the Debug tab
+- Capture Inventory and Tek Cancel keys
+- Use F6 to capture inventory ROI (two presses)
+- Use the coordinate dropdown + F7 to capture key UI coordinates
 
----
+—
 
-## 🎯 Core Hotkeys
+## 🎮 Hotkeys
 
-| Hotkey | Function | Description |
-|--------|----------|-------------|
-| **F1** | Toggle Overlay | Show/hide main interface |
-| **F2** | Equip Flak Set | Searches and equips flak armor from inventory |
-| **F3** | Equip Tek Set | Searches and equips Tek armor from inventory |
-| **F4** | Equip Mixed Set | Searches and equips mixed set from inventory |
-| **Shift+Q** | Medbrew Burst | Quick consumption burst |
-| **Shift+E** | Medbrew HoT Toggle | Background thread toggles healing-over-time |
-| **Shift+R** | Tek Punch (Tek Dash) | Executes Tek punch sequence (preserves jetpack if holding Shift) |
-| **F6** | Capture ROI | Manual inventory region capture (two-press corner selection) |
-| **F7** | Recalibrate / SIM Capture | Opens calibration UI; when SIM calibration is active, captures a point |
-| **F9** | Stop SIM Calibration | Ends SIM capture mode and restores overlay |
-| **F11** | Start/Stop Auto SIM | Global toggle to start/stop SIM and hide/show overlay |
-| **F10** | Exit | Graceful application shutdown |
+| Hotkey | Function |
+|--------|----------|
+| F1     | Toggle Overlay |
+| F2     | Equip Flak Set |
+| F3     | Equip Tek Set |
+| F4     | Equip Mixed Set |
+| Shift+Q| Medbrew Burst |
+| Shift+E| Medbrew HoT (background thread) |
+| Shift+R| Tek Punch (preserves jetpack) |
+| F6     | ROI capture (two-press corners) |
+| F7     | Recalibration / Coordinate capture |
+| F9     | Stop calibration (if applicable) |
+| F11    | Start/Stop AutoSim |
+| F10    | Exit |
 
----
+—
 
-## 🧭 Auto SIM Usage
-- Open the SIM tab in the overlay.
-- Enter your server code (e.g., 2133).
-- Press Start, or use the global hotkey F11 to start/stop the SIM and auto-hide/show the overlay.
-- SIM Calibration: click "Start (use F7)" on the SIM tab, then press F7 to log cursor coordinates as needed; press F9 to stop.
+## 🧭 AutoSim Usage
+- Open Utilities tab in the overlay
+- Enter server number (e.g., 2133)
+- Press Start or F11 to begin; overlay hides during automation
+- Automation uses watcher state; success = 2s no-menu
+- Connection_Failed is dismissed automatically; workflow resumes deterministically
 
-## ⚙️ Advanced Configuration
+See docs/autosim-comprehensive.md and docs/autosim-success-detection-fix.md.
 
-### F6 Manual ROI Capture
-For maximum performance, capture a custom inventory region:
-
-1. **Press F6** to start ROI capture mode
-2. **Click top-left** corner of your inventory area
-3. **Click bottom-right** corner to complete capture
-4. **ROI snapshot** saved to `%APPDATA%/Gangware/templates/roi.png`
-5. **Automatic bypass** of slow auto-calibration (2+ second improvement)
-
-### Performance Optimization
-- **Template Cropping**: Focuses on item icons vs backgrounds
-- **Smart Scaling**: Reduced calibration scales from 23 to 5 for speed
-- **Fast/Slow Pass**: Early exit optimization for common matches
-- **Mouse Timing**: Baseline 2ms movement settle, but ~20ms stabilization before/after focus clicks (e.g., search field) to ensure Ark reliably registers input
-
-### Multi-Monitor Setup
-- **Automatic Detection**: Per-monitor coordinate logging
-- **Coordinate Translation**: Intelligent region mapping
-- **Fallback Logic**: F6 ROI override when auto-detection fails
-
-### Reliability Guardrails (IMPORTANT)
-- Do not reduce stabilization waits around UI focus clicks below ~15–20 ms. Under-speeding these delays can cause Ark to miss focus/clicks and break macros. Current default: 20 ms before/after focusing the search box in the F2 macro.
-- Keep baseline movement settle minimal (2 ms) for speed; rely on guarded waits only where necessary to ensure focus reliability.
-- Configuration keys relevant to diagnostics and tuning:
-  - slow_task_threshold_ms (default 1000)
-  - health_monitor (True/False; default True)
-  - health_interval_seconds (default 5)
-
-### Diagnostics and Support Bundle
-- Per-session logs at %APPDATA%/Gangware/logs/session-YYYYmmdd_HHMMSS/
-- Includes: gangware.log, heartbeat.log, health.json, environment.json, and artifacts/
-- environment.json captures monitors, game window resolution, and borderless state (if Ark is foreground at startup)
-
----
+—
 
 ## 🏗️ Architecture
 
-### Module boundaries (v6.2)
-- core/hotkeys/hook.py: Windows RegisterHotKey + message pump; used by HotkeyManager
-- config/hotkeys.py: centralized VK codes, modifiers, and ID→label map
-- core/win32/utils.py: cursor pos, Ark window rects/title/process, foreground exe, ROI rel↔abs, ensure_ark_foreground
-- core/roi/service.py: two-press F6 ROI flow (first-press hint, clamp, rel+abs persistence, snapshot, overlay updates)
-- features/debug/template.py: wait_and_capture_template for F8 search-bar capture
-- features/debug/keys.py: capture_input_windows and wait_key_release (Esc restart; ignores F1/F7/F8)
-- gui/overlay.py: thread-safe feedback API (flash/set active/clear) via signals; SIM tab with start/stop and calibration signals; no business logic
-- core/hotkey_manager.py: thin orchestration (handlers, Ark foreground checks, overlay feedback)
+- Package-by-Feature: src/gangware/features/{combat,autosim,debug}
+- Shared utilities: core/, io/, vision/, gui/
+- Dependency injection for services
+- Event flow: hotkeys/overlay → task queue/worker → feature modules → io/vision
 
-### Logging & artifacts
-- Session-based logging in %APPDATA%/Gangware/logs/session-YYYYmmdd_HHMMSS/
-- INFO for transitions/decisions; DEBUG for ROI math/coords; artifacts only on detection failures
+Refer to docs/blueprint.md (authoritative) for principles, structure, testing, and performance budgets.
 
-### Run the app
+—
 
+## 📑 Documentation & ADRs
+- Blueprint (authoritative): docs/blueprint.md
+- Runbook: docs/RUNBOOK.md
+- Testing: docs/TESTING.md
+- Security: docs/SECURITY.md
+- Commenting Standards: docs/CONTRIBUTING-COMMENTS.md
+- Architectural Decision Records: docs/adr/
+  - ADR-0009: Package-by-Feature structure and legacy removal
+  - ADR-0010: AutoSim detection strategy and state model
+  - (See folder for additional ADRs.)
+
+—
+
+## 🔍 Diagnostics & Support Bundle
+- Logs under %APPDATA%/Gangware/logs/session-<timestamp>/
+- Includes gangware.log, health.json, environment.json, artifacts on failures
+- Enable performance metrics with GW_VISION_PERF=1
+
+—
+
+## 🧪 Quality Gates
 ```powershell
-python -m gangware.main
-```
-
-Or alternatively use the batch script:
-
-```powershell
-.\tools\scripts\run.bat
-```
-
-Debug tools (Windows)
---------------------------
-If calibration is not complete, the overlay will guide you through these steps:
-1) Press your Inventory key (keyboard or mouse). Left/Right mouse buttons are allowed; Middle/X buttons are accepted.
-2) Press your Tek Punch Cancel key (keyboard or mouse).
-3) Open your inventory, hover the search bar, and press F8 to capture a small template image. The template is saved to `%APPDATA%/Gangware/templates/search_bar.png` (per-user) and its absolute path recorded in the config.
-
-Setup is marked complete only after the template is captured and saved.
-
-Overlay behavior
-----------------
-- The overlay is always on top, anchored to the top-right corner of the active screen.
-- Thread-safe API: background threads use overlay.set_status_safe, set_visible_safe, flash_hotkey_line, set_hotkey_line_active, clear_hotkey_line_active
-### Testing & Quality Assurance
-```powershell
-# Run test suite
-python -m pytest tests/ -v
-
-# Linting and types
 ruff check src/
 mypy src/
-
-# Performance profiling (enable session timing in logs)
-$env:GW_VISION_PERF = "1"; python -m gangware.main
+pytest -q
 ```
 
-### Contributing
-1. **Fork the repository**
-2. **Create feature branch**: `git checkout -b feature/amazing-optimization`
-3. **Make changes** with comprehensive testing
-4. **Run quality checks**: Style, tests, and performance validation
-5. **Submit pull request** with detailed performance analysis
+—
 
----
+## 🔒 Security & Ethics
+- External OS input only; no code/memory injection
+- No telemetry; logs avoid PII
 
-## 📚 Guides and Advanced Topics
-- Enhanced Server Detection Deep Dive: docs/guides/enhanced_server_detection.md
+—
 
-## 📊 Technical Specifications
-
-### Computer Vision Pipeline
-- **OpenCV 4.8+**: Template matching with edge detection
-- **MSS Library**: High-performance screen capture
-- **HSV Color Space**: Tier validation via hue analysis
-- **Multi-Scale Matching**: UI scaling robustness
-
-### Performance Architecture
-- **Threading Model**: Background processing with GUI thread safety
-- **Memory Management**: Template caching and smart garbage collection
-- **Coordinate System**: Multi-monitor aware with per-screen detection
-- **Error Handling**: Graceful degradation with fallback logic
-
-### Security & Ethics
-- **External Automation**: No game file modification
-- **Memory Safe**: No memory injection or process manipulation
-- **Privacy Focused**: No data collection or network communication
-- **Open Source**: Full source code transparency
-
----
-
-## � Recent Changes
-
-### August 2025 - Tek Punch Reliability & Jetpack Fix
-- **Fixed jetpack preservation**: Tek punch no longer turns off jetpack when holding Shift
-- **Simplified gate logic**: Removed complex buffering for more reliable tek punch execution
-- **Improved timing**: Consistent 1.2s execution time with 500ms cooldown
-- **Better user experience**: Predictable behavior during rapid key presses
-- **Reduced complexity**: Eliminated ~100 lines of complex timing logic
-
-See `docs/ADRs/ADR-0007-tek-punch-gate-simplification.md` and `docs/ADRs/ADR-0008-jetpack-preservation-fix.md` for technical details.
-
----
-
-## �📜 License
-
-MIT License - See LICENSE file for details
-
----
-
-## 🤝 Support
-
-For technical support, performance optimization, or feature requests:
-- **Issues**: GitHub issue tracker with performance logs
-- **Documentation**: Comprehensive blueprint in `blueprint.md`
-- **Performance Analysis**: Enable debug timing for optimization assistance
-
----
-
-**Gangware v6.2** - Modular, observable, and fast. Where performance meets precision in ARK automation.
+## 📄 License
+MIT License — see LICENSE

@@ -6,7 +6,11 @@
 
 ## Changelog
 
-**2025-08-25 (Latest):** AutoSim retry logic fixes - Fixed infinite retry loops where counter exceeded maximum (5/4, 6/4, 7/4, 8/4); proper 15-second timeout enforcement after Join Game click; connection failures now handled without inappropriate retry counter increments; retry limits properly respected (stops at 4/4); improved error recovery and navigation logic. See ADR-0011.
+## Changelog
+
+**2025-08-25 (Latest):** AutoSim F11 toggle crash fix - Added automation state checks in all Qt timer callback methods; proper timer and workflow cleanup in stop() method; prevents crashes when F11 is pressed during active automation steps; early return from timer callbacks if automation was stopped via F11.
+
+**2025-08-25:** AutoSim retry logic fixes - Fixed infinite retry loops where counter exceeded maximum (5/4, 6/4, 7/4, 8/4); proper 15-second timeout enforcement after Join Game click; connection failures now handled without inappropriate retry counter increments; retry limits properly respected (stops at 4/4); improved error recovery and navigation logic. See ADR-0011.
 
 **2025-08-25:** AutoSim added (menu-aware server join); success detection based on 2s no-menu window; Connection_Failed popup handling via dual detection (template + Tier 3 modal heuristic); post-Join gating with shared state; F11 toggle; multi-ROI support; suppression windows; bounded navigation; resume signaling.
 
@@ -15,6 +19,8 @@
 **2025-08-22:** Removed "patch" terminology and workflows. Adopted changeset model aligned with interactive "review/approve" editing tools. Clarified commenting standards and change scopes.
 
 **2025-08-22 (prior):** Controller refactor; ROI service; debug helpers; centralized hotkeys; overlay feedback API; Debug tab; F7 debug capture; F9 stop.
+
+Earlier entries unchanged.
 
 Earlier entries unchanged.gineering Blueprint
 

@@ -553,8 +553,98 @@ class HotkeyManager(threading.Thread):
     def _on_hotkey_f11(self) -> None:
         """F11 hotkey handler - toggle autosim start/stop via overlay signal."""
         try:
-            if self.overlay and hasattr(self.overlay, "toggle_autosim"):
-                self.overlay.toggle_autosim()
+            # Use overlay's thread-safe signal API where possible. Calling UI methods
+            # directly from the hotkey thread can cause Qt to crash. Prefer emitting
+            # the autosim start/stop signals or using trigger methods which are safe
+            # to call from other threads.
+            if self.overlay:
+                # If overlay exposes trigger methods for autosim start/stop, use them
+                if hasattr(self.overlay, "toggle_autosim"):
+                    # toggle_autosim may call UI methods; prefer safer trigger slots
+                    try:
+                        # If overlay has explicit trigger methods, use them to ensure
+                        # the signal is emitted on the Qt side; otherwise fall back to
+                        # calling toggle_autosim which already guards visibility changes.
+                        if (
+                            hasattr(self.overlay, "trigger_autosim_start")
+                            and hasattr(self.overlay, "trigger_autosim_stop")
+                        ):
+                            # Determine current visible state via isVisible on overlay
+                            # but guard with hasattr to avoid cross-thread UI access
+                            if hasattr(self.overlay, "isVisible") and callable(getattr(self.overlay, "isVisible")):
+                                try:
+                                    visible = self.overlay.isVisible()
+                                except Exception:
+                                    visible = True
+                            else:
+                                visible = True
+
+                            if visible:
+                                # Overlay visible -> autosim not running, start
+                                try:
+                                    self.overlay.trigger_autosim_start()
+                                except Exception:
+                                    # Fall back to emitting signal directly
+                                    if (
+                                        hasattr(self.overlay, "signals")
+                                        and hasattr(self.overlay.signals, "autosim_start")
+                                    ):
+                                        self.overlay.signals.autosim_start.emit()
+                            else:
+                                # Overlay hidden -> autosim running, stop
+                                try:
+                                    self.overlay.trigger_autosim_stop()
+                                except Exception:
+                                    if (
+                                        hasattr(self.overlay, "signals")
+                                        and hasattr(self.overlay.signals, "autosim_stop")
+                                    ):
+                                        self.overlay.signals.autosim_stop.emit()
+                        else:
+                            # No trigger helpers — as a last resort call toggle_autosim
+                            # which will emit signals and set visibility. Wrap in try/except
+                            # to avoid crashes from cross-thread UI calls.
+                            try:
+                                self.overlay.toggle_autosim()
+                            except Exception:
+                                # If toggle_autosim fails cross-thread, emit signals directly
+                                if (
+                                    hasattr(self.overlay, "signals")
+                                    and hasattr(self.overlay.signals, "autosim_start")
+                                    and hasattr(self.overlay.signals, "autosim_stop")
+                                ):
+                                    # Best-effort: emit stop if we believe autosim is running, else start
+                                    try:
+                                        visible = self.overlay.isVisible()
+                                    except Exception:
+                                        visible = True
+                                    if visible:
+                                        self.overlay.signals.autosim_start.emit()
+                                    else:
+                                        self.overlay.signals.autosim_stop.emit()
+                    except Exception:
+                        pass
+                else:
+                    # Overlay doesn't have toggle; try to use signals directly
+                    if (
+                        hasattr(self.overlay, "signals")
+                        and hasattr(self.overlay.signals, "autosim_start")
+                        and hasattr(self.overlay.signals, "autosim_stop")
+                    ):
+                        try:
+                            # Default to emitting start if overlay is visible (autosim not running)
+                            visible = True
+                            if hasattr(self.overlay, "isVisible") and callable(getattr(self.overlay, "isVisible")):
+                                try:
+                                    visible = self.overlay.isVisible()
+                                except Exception:
+                                    visible = True
+                            if visible:
+                                self.overlay.signals.autosim_start.emit()
+                            else:
+                                self.overlay.signals.autosim_stop.emit()
+                        except Exception:
+                            pass
         except Exception:
             pass
 

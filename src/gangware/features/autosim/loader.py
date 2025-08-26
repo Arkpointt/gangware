@@ -55,6 +55,10 @@ class AutoSim:
     def _focus_ark_step(self) -> None:
         """Step 1: Focus ARK window."""
         try:
+            # Check if automation is still active (prevents F11 toggle crashes)
+            if not self._automation_active:
+                return
+
             from ...core.win32.utils import ensure_ark_foreground, foreground_executable_name
             from PyQt6.QtCore import QTimer
 
@@ -80,6 +84,10 @@ class AutoSim:
     def _wait_for_menu_step(self) -> None:
         """Step 2: Wait for menu detection to stabilize."""
         try:
+            # Check if automation is still active (prevents F11 toggle crashes)
+            if not self._automation_active:
+                return
+
             from PyQt6.QtCore import QTimer
 
             # Wait for menu detection to be stable (2 second delay split into Qt-safe chunks)
@@ -92,6 +100,10 @@ class AutoSim:
     def _execute_automation_step(self) -> None:
         """Step 3: Execute the actual automation."""
         try:
+            # Check if automation is still active (prevents F11 toggle crashes)
+            if not self._automation_active:
+                return
+
             # Get current menu state
             menu_state = self.state.get("autosim_menu")
             if menu_state and menu_state.name and self._automation_active and self._workflow:
@@ -140,6 +152,19 @@ class AutoSim:
     def stop(self) -> None:
         """Stop AutoSim menu watching and automation."""
         self._automation_active = False
+
+        # Clean up automation timer to prevent crashes during F11 toggle
+        if self._automation_timer is not None:
+            try:
+                self._automation_timer.stop()
+                self._automation_timer = None
+            except Exception:
+                pass
+
+        # Stop workflow if active
+        if self._workflow:
+            self._workflow = None
+
         if self._watch:
             self._watch.stop()
             self._watch = None

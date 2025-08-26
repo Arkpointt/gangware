@@ -411,8 +411,33 @@ class AutoSimWorkflow:
 
         if detected_menu:
             self._logger.info("AutoSim: After closing popup, detected menu: %s", detected_menu)
-            # Restart the workflow from the detected menu with SAME retry count (not incremented)
-            return self.execute_from_menu(detected_menu, server_number, retry_count)
+
+            # If we're already at SELECT_GAME, restart workflow directly
+            if detected_menu == "SELECT_GAME":
+                return self.execute_from_menu(detected_menu, server_number, retry_count)
+
+            # If we're at SERVER_BROWSER, navigate back to SELECT_GAME first
+            elif detected_menu == "SERVER_BROWSER":
+                self._logger.info("AutoSim: At SERVER_BROWSER, clicking Back to return to SELECT_GAME")
+                if self._click_coordinate("coord_back"):
+                    time.sleep(1.0)
+                    # Check if we made it to SELECT_GAME
+                    final_menu = self._detect_current_menu()
+                    if final_menu == "SELECT_GAME":
+                        self._logger.info("AutoSim: Successfully navigated back to SELECT_GAME")
+                        return self.execute_from_menu(final_menu, server_number, retry_count)
+                    else:
+                        self._logger.warning("AutoSim: Expected SELECT_GAME after Back click, got: %s", final_menu)
+                        return False
+                else:
+                    self._logger.error("AutoSim: Failed to click Back button from SERVER_BROWSER")
+                    return False
+
+            # For any other menu, try to restart from there
+            else:
+                self._logger.info("AutoSim: Restarting workflow from %s", detected_menu)
+                return self.execute_from_menu(detected_menu, server_number, retry_count)
+
         else:
             self._logger.warning("AutoSim: Could not detect menu after closing Connection_Failed popup")
             # If we can't detect the menu, assume we're back at server browser and click back
@@ -421,9 +446,8 @@ class AutoSimWorkflow:
                 time.sleep(1.0)
                 # Try to detect menu again
                 detected_menu = self._detect_current_menu()
-                if detected_menu:
+                if detected_menu == "SELECT_GAME":
                     self._logger.info("AutoSim: After Back button, detected menu: %s", detected_menu)
-                    # Restart the workflow from the detected menu with SAME retry count (not incremented)
                     return self.execute_from_menu(detected_menu, server_number, retry_count)
 
             self._logger.error("AutoSim: Failed to recover from Connection_Failed state")

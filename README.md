@@ -122,6 +122,7 @@ Refer to docs/blueprint.md (authoritative) for principles, structure, testing, a
 - Architectural Decision Records: docs/adr/
   - ADR-0009: Package-by-Feature structure and legacy removal
   - ADR-0010: AutoSim detection strategy and state model
+  - ADR-0011: AutoSim retry logic fix (infinite loop prevention)
   - (See folder for additional ADRs.)
 
 —

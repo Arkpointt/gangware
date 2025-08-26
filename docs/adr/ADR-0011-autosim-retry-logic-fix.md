@@ -1,7 +1,7 @@
 # ADR-0011: AutoSim Retry Logic Fix
 
-**Status:** Accepted  
-**Date:** 2025-08-25  
+**Status:** Accepted
+**Date:** 2025-08-25
 **Deciders:** Gangware Maintainers
 
 ## Context
@@ -37,11 +37,11 @@ def _handle_connection_failed(self, server_number: str, retry_count: int) -> boo
     if retry_count >= self.max_retries:
         self._logger.warning("AutoSim: Max retries (%d) reached while handling connection failure. Aborting.", self.max_retries)
         return False
-    
+
     # Handle popup without incrementing retry count
     if not self._handle_connection_failed_popup():
         return False
-    
+
     # Navigate back with SAME retry count (not incremented)
     return self._navigate_back_to_select_game(server_number, retry_count)
 ```
@@ -122,7 +122,7 @@ def _handle_connection_failed(self, server_number: str, retry_count: int) -> boo
 ## Rollback Plan
 
 If issues arise:
-1. Revert commit `8cd7baf` 
+1. Revert commit `8cd7baf`
 2. Previous retry logic will be restored
 3. Would need to accept infinite retry loop behavior until alternative fix developed
 

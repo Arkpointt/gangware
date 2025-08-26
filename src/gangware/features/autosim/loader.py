@@ -77,10 +77,21 @@ class AutoSim:
                 self._update_status("No menu detected for automation")
                 self._show_overlay_when_done()
 
-        # Run automation in a separate thread-like manner (using QTimer in practice)
-        import threading
-        automation_thread = threading.Thread(target=run_automation, daemon=True)
-        automation_thread.start()
+        # Run automation using QTimer instead of threading (safer for Qt applications)
+        try:
+            from PyQt6.QtCore import QTimer
+
+            # Schedule automation to run after a short delay
+            timer = QTimer()
+            timer.setSingleShot(True)
+            timer.timeout.connect(run_automation)
+            timer.start(100)  # Start after 100ms
+
+        except ImportError:
+            # Fallback to threading if Qt not available (shouldn't happen in normal usage)
+            import threading
+            automation_thread = threading.Thread(target=run_automation, daemon=True)
+            automation_thread.start()
 
     def tick(self) -> None:
         """Lightweight poll to resume automation if watcher signaled a resume point."""
